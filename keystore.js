@@ -71,6 +71,19 @@ export const KeyStore = {
     return kp && b64(await crypto.subtle.exportKey('spki', kp.publicKey));
   },
 
+  async getPublicKeyBase64() {
+    if (await this.hasKey()) return await this.publicKey();
+    return await this.create();
+  },
+
+  async getDeviceId() {
+    return localStorage.getItem('device_id');
+  },
+
+  async signAuth(msg) {
+    return await this.sign(msg);
+  },
+
   async sign(msg) {
     const kp = await get('keypair');
     if (!kp?.privateKey) throw new Error('NO_KEY');

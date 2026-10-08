@@ -32,6 +32,41 @@ const S = {
 };
 
 // ==========================================
+// PWA INSTALLATION RAPIDE
+// ==========================================
+let deferredPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  const b = document.getElementById('c-install-btn') || document.getElementById('c-hdr-install-btn');
+  if (b) b.style.display = 'inline-flex';
+});
+
+window.addEventListener('appinstalled', () => {
+  deferredPrompt = null;
+  toast('Application WANI installée !', 'ok');
+});
+
+function isStandalone() {
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+
+async function triggerInstall() {
+  if (deferredPrompt) {
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === 'accepted') deferredPrompt = null;
+  } else {
+    const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) && !window.MSStream;
+    if (isIOS) {
+      alert("Pour installer WANI sur votre iPhone/iPad :\n\n1. Appuyez sur le bouton Partager ⎋ (en bas de Safari)\n2. Faites défiler et touchez 'Sur l'écran d'accueil' ⊕\n3. Appuyez sur 'Ajouter'");
+    } else {
+      alert("Pour installer l'application WANI :\n\nOuvrez le menu de votre navigateur (les 3 points ⋮ en haut à droite) et touchez 'Installer l'application' ou 'Ajouter à l'écran d'accueil'.");
+    }
+  }
+}
+
+// ==========================================
 // CLIENT API & AUTHENTIFICATION SANS MOT DE PASSE
 // ==========================================
 async function raw(method, path, body = null, token = null) {
@@ -81,24 +116,33 @@ async function refresh() {
 }
 
 async function register(displayName) {
-  const pk = await KS.getPublicKeyBase64();
-  const did = await KS.getDeviceId();
-  const regSig = await KS.signAuth(`register|${did}|${pk}`);
+  let pk;
+  if (await KS.hasKey()) {
+    pk = await KS.publicKey();
+  } else {
+    pk = await KS.create();
+  }
+  const ts = Date.now();
+  const pop = await KS.sign(`register|${pk}|${ts}`);
+  const ua = navigator.userAgent;
+  const platform = /Android/.test(ua) ? 'android' : /iPhone|iPad/.test(ua) ? 'ios' : 'web';
   const r = await raw('POST', '/auth/device/register', {
-    device_id: did,
     public_key: pk,
-    device_name: 'Mobile Client',
-    platform: 'web',
+    pop,
+    ts,
     display_name: displayName || 'Client',
-    registration_signature: regSig
+    device_name: platform === 'web' ? 'Mobile Client' : platform,
+    platform
   });
+  localStorage.setItem('device_id', r.device_id);
   return r;
 }
 
 async function login() {
-  const did = await KS.getDeviceId();
+  const did = localStorage.getItem('device_id');
+  if (!did) throw new Error('NO_DEVICE_ID');
   const ch = await raw('POST', '/auth/device/challenge', { device_id: did });
-  const sig = await KS.signAuth(`auth|${did}|${ch.nonce}`);
+  const sig = await KS.sign(`auth|${did}|${ch.nonce}`);
   const r = await raw('POST', '/auth/device/verify', {
     device_id: did,
     nonce: ch.nonce,
@@ -174,7 +218,15 @@ function shell(title, body, active = '') {
           <div style="width:34px;height:34px;border-radius:10px;background:var(--p);color:#fff;display:grid;place-items:center;font-weight:900;font-family:var(--hd);font-size:1.1rem">W</div>
           <b class="hd" style="font-size:1.15rem">${esc(title)}</b>
         </div>
-        ${S.ctx ? `<span class="pill" style="font-size:0.75rem">${esc(S.ctx.point?.label || S.ctx.establishment?.name)}</span>` : ''}
+        <div class="row" style="gap:6px;align-items:center">
+          ${!isStandalone() ? `
+            <button class="sm sec" id="c-hdr-install-btn" title="Installer l'application" style="display:inline-flex;align-items:center;gap:4px">
+              <span class="material-symbols-outlined text-[18px]">install_mobile</span>
+              <span>Installer</span>
+            </button>
+          ` : ''}
+          ${S.ctx ? `<span class="pill" style="font-size:0.75rem">${esc(S.ctx.point?.label || S.ctx.establishment?.name)}</span>` : ''}
+        </div>
       </div>
     </header>
     <main class="col" style="padding-top:14px;padding-bottom:24px">${body}</main>
@@ -193,6 +245,8 @@ function shell(title, body, active = '') {
       </a>
     </nav>
   `;
+
+  $('#c-hdr-install-btn')?.addEventListener('click', triggerInstall);
 }
 
 // ==========================================
@@ -200,18 +254,25 @@ function shell(title, body, active = '') {
 // ==========================================
 function welcome(err = '') {
   app.innerHTML = `
-    <main class="col" style="padding-top:40px;text-align:center">
+    <main class="col" style="padding-top:36px;text-align:center">
       <div style="width:80px;height:80px;margin:0 auto 12px;border-radius:50%;background:linear-gradient(135deg,#ffdbce,#fed7aa);display:grid;place-items:center;box-shadow:0 8px 24px rgba(194,65,12,0.25);border:3px solid #fff">
         <span class="material-symbols-outlined text-[42px]" style="color:var(--p)">sports_bar</span>
       </div>
       <h1 style="font-size:2.2rem;font-weight:900;justify-content:center;color:var(--tx);letter-spacing:-0.5px">WANI</h1>
-      <div style="font-size:0.85rem;color:var(--p);font-weight:800;margin:-6px auto 14px;text-transform:uppercase;letter-spacing:1px">Emmener · Commander · Servir</div>
+      <div style="font-size:0.95rem;color:var(--p);font-weight:800;margin:-4px auto 14px;letter-spacing:0.5px">Commandez et soyez servi !</div>
       
       <div class="badge g" style="margin:0 auto 14px;font-size:0.8rem">Connexion instantanée</div>
       
-      <p class="muted" style="margin:0 auto 24px;max-width:360px;line-height:1.5">
+      <p class="muted" style="margin:0 auto 16px;max-width:360px;line-height:1.5">
         <strong>Votre appareil vous reconnaît automatiquement.</strong> Aucun mot de passe à retenir. Vos commandes arrivent directement au bar ou en cuisine.
       </p>
+
+      <div style="margin:0 auto 16px;max-width:360px">
+        <button class="big sm sec" id="c-install-btn" style="border:2px solid var(--p);color:var(--p);font-weight:800;display:inline-flex;align-items:center;justify-content:center;gap:8px;width:100%;background:#fff7ed">
+          <span class="material-symbols-outlined text-[20px]">install_mobile</span>
+          📲 Installer l'application sur cet appareil
+        </button>
+      </div>
 
       <div class="card col" style="text-align:left">
         <label class="muted" style="font-weight:700">Votre Prénom ou Surnom</label>
@@ -220,22 +281,36 @@ function welcome(err = '') {
         ${err ? `<p style="color:var(--er);margin:8px 0 0;font-size:0.85rem;font-weight:600">${esc(err)}</p>` : ''}
       </div>
 
-      <div style="margin-top:20px;font-size:0.85rem;color:var(--tx-muted)">
-        💡 <em>Wani</em> signifie <strong>« emmener, venir avec »</strong> en mooré.
+      <div style="margin-top:20px;font-size:0.85rem;color:var(--tx-muted);font-weight:600">
+        ⚡ Commandez et soyez servi !
       </div>
     </main>
   `;
 
+  $('#c-install-btn')?.addEventListener('click', triggerInstall);
   $('#start-btn').onclick = async () => {
     $('#start-btn').disabled = true;
     try {
       const name = $('#name-in').value.trim() || 'Client';
+      const did = localStorage.getItem('device_id');
+      const hasKey = await KS.hasKey();
+      if (did && hasKey) {
+        try {
+          await login();
+          location.hash = '#/';
+          route();
+          return;
+        } catch (err) {
+          console.warn('Reconnexion échouée:', err);
+        }
+      }
       await register(name);
       await login();
       location.hash = '#/';
       route();
     } catch (e) {
-      welcome('Impossible d\'accéder (' + e.message + ')');
+      $('#start-btn').disabled = false;
+      welcome('Impossible d\'accéder : ' + (e.message || e));
     }
   };
 }
@@ -849,6 +924,14 @@ window.addEventListener('DOMContentLoaded', async () => {
       S.tokens = null;
       LS.del('auth');
     }
+  }
+  if (localStorage.getItem('device_id') && (await KS.hasKey())) {
+    try {
+      await login();
+      connectSse();
+      route();
+      return;
+    } catch {}
   }
   welcome();
 });
