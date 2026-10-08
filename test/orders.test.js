@@ -97,3 +97,48 @@ test('tables: rotation QR, modification libellé et désactivation par le géran
   assert.equal(check.status, 404);
   e.close();
 });
+
+test('vendeur: création établissement, ajout de points de livraison et produits', async () => {
+  const { e, tok } = await setup();
+  // Vendeur crée son propre établissement
+  const estRes = await e.call('POST', '/establishments', { name: 'Maquis du Faso' }, tok.c);
+  assert.equal(estRes.status, 201);
+  const myEst = estRes.body.id;
+  assert.ok(myEst);
+
+  // Vendeur ajoute un point de livraison (Table 12)
+  const ptRes = await e.call('POST', `/establishments/${myEst}/points`, { code: 'T12', label: 'Table 12 Terrasse' }, tok.c);
+  assert.equal(ptRes.status, 201);
+  assert.ok(ptRes.body.token);
+
+  // Le QR du point de livraison est immédiatement valide
+  const qrCheck = await e.call('GET', `/qr/${ptRes.body.token}`);
+  assert.equal(qrCheck.status, 200);
+  assert.equal(qrCheck.body.point.code, 'T12');
+
+  // Vendeur ajoute un produit
+  const prodRes = await e.call('POST', '/products', {
+    establishment_id: myEst,
+    name: 'Tô sauce gombo',
+    price: 1200,
+    description: 'Plat traditionnel burkinabè'
+  }, tok.c);
+  assert.equal(prodRes.status, 201);
+  const prodId = prodRes.body.id;
+
+  // Liste des produits
+  const list = await e.call('GET', `/products?establishment_id=${myEst}`, null, tok.c);
+  assert.equal(list.status, 200);
+  assert.equal(list.body.length, 1);
+  assert.equal(list.body[0].name, 'Tô sauce gombo');
+
+  // Suppression / archivage du produit
+  const delP = await e.call('DELETE', `/products/${prodId}`, null, tok.c);
+  assert.equal(delP.status, 200);
+
+  const listAfter = await e.call('GET', `/products?establishment_id=${myEst}`, null, tok.c);
+  assert.equal(listAfter.body.length, 0);
+
+  e.close();
+});
+

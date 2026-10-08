@@ -11,8 +11,8 @@ const LS = {
 
 const ST = {
   EXPIRED: 'Expirée', REJECTED: 'Refusée', CANCELLED: 'Annulée',
-  SUBMITTED: 'Envoyée', RECEIVED: 'Reçue', PREPARING: 'En préparation',
-  READY: 'Prête', DELIVERING: 'En livraison', DELIVERED: 'Livrée', COMPLETED: 'Terminée'
+  SUBMITTED: 'Envoyée (En attente)', RECEIVED: 'Reçue par le vendeur', PREPARING: 'En préparation',
+  READY: 'Prête', DELIVERING: 'En livraison', DELIVERED: 'Livrée à table', COMPLETED: 'Terminée'
 };
 const FLOW = ['SUBMITTED', 'RECEIVED', 'PREPARING', 'READY', 'DELIVERING', 'DELIVERED', 'COMPLETED'];
 
@@ -321,22 +321,22 @@ function welcome(err = '') {
       </div>
       <h1 style="font-size:2rem;font-weight:900;justify-content:center;color:var(--tx);letter-spacing:-0.5px">WANI</h1>
       <div style="font-size:0.85rem;color:var(--p);font-weight:700;margin:-6px auto 10px;text-transform:uppercase;letter-spacing:1px">Emmener · Commander · Servir</div>
-      <div class="badge g" style="margin:0 auto 12px;font-size:0.75rem">Clé cryptographique matérielle</div>
+      <div class="badge g" style="margin:0 auto 12px;font-size:0.75rem">Connexion instantanée</div>
       <p class="muted" style="margin:0 auto 20px;max-width:380px;line-height:1.5">
-        <strong>L'appareil est votre clé d'accès.</strong> Aucun mot de passe à retenir. Votre clé privée est générée sur cet appareil et ne le quitte jamais.
+        <strong>Votre appareil vous reconnaît automatiquement.</strong> Aucun mot de passe à retenir ni à taper. Commandez directement en toute simplicité.
       </p>
       <div class="card col" style="text-align:left">
         <label class="muted" style="font-weight:700">Votre Nom ou Prénom</label>
         <input id="n" placeholder="Ex : Oumar, Fatou, Client..." autocomplete="given-name">
         <label class="muted" style="font-weight:700;margin-top:4px">Code d'équipe / gérant (facultatif)</label>
         <input id="c" placeholder="Code d'association (ex: XXXXX-XXXXX)" autocapitalize="characters">
-        <button class="big" id="go" style="margin-top:8px">Créer mon accès sécurisé</button>
+        <button class="big" id="go" style="margin-top:8px">Commencer &amp; Commander</button>
         ${err ? `<p style="color:var(--er);margin:6px 0 0;font-size:0.85rem;font-weight:600">${esc(err)}</p>` : ''}
       </div>
       <details style="text-align:left;margin-top:12px;background:#fff;padding:12px;border-radius:12px;border:1px solid var(--bd)">
-        <summary class="muted" style="cursor:pointer;font-weight:700">Appareil perdu ou changé ?</summary>
-        <p class="muted" style="font-size:0.82rem;margin:8px 0">Vous pouvez demander une récupération d'appareil si votre ancien téléphone a été égaré.</p>
-        <button class="sec sm" id="rec">Demander une récupération d'accès</button>
+        <summary class="muted" style="cursor:pointer;font-weight:700">Changement de téléphone ?</summary>
+        <p class="muted" style="font-size:0.82rem;margin:8px 0">Restaurez votre compte facilement sur votre nouvel appareil.</p>
+        <button class="sec sm" id="rec">Demander la restauration du compte</button>
       </details>
     </main>
   `;
@@ -443,7 +443,13 @@ function home() {
         <span class="material-symbols-outlined text-[24px]">qr_code_scanner</span>
         Scanner le QR de la table
       </button>
+      <label class="btn sec sm" style="margin-top:6px;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer">
+        <span class="material-symbols-outlined text-[18px]">photo_camera</span>
+        Prendre une photo du QR
+        <input type="file" id="pic-qr" accept="image/*" capture="environment" style="display:none">
+      </label>
       <video id="vid" playsinline muted style="display:none;width:100%;border-radius:14px;border:2px solid var(--p);box-shadow:0 8px 20px rgba(0,0,0,0.15)"></video>
+      <canvas id="qr-cvs" style="display:none"></canvas>
       <div class="row" style="margin-top:6px">
         <input id="code" placeholder="Code du token QR (ex: J04, S01...)">
         <button class="sec sm" id="ok" style="width:110px">Valider</button>
@@ -463,38 +469,75 @@ function home() {
     }
   };
   $('#cam').onclick = camScan;
+  $('#pic-qr')?.addEventListener('change', e => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const img = new Image();
+    img.src = URL.createObjectURL(file);
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = img.width; c.height = img.height;
+      const cx = c.getContext('2d'); cx.drawImage(img, 0, 0);
+      const id = cx.getImageData(0, 0, c.width, c.height);
+      const res = window.jsQR ? window.jsQR(id.data, id.width, id.height) : null;
+      if (res?.data) {
+        const t = res.data.includes('q=') ? (new URL(res.data, 'http://x').searchParams.get('q') || res.data) : res.data;
+        scan(t).then(() => { location.hash = '#/menu'; }).catch(() => toast('QR invalide ou expiré', 'error'));
+      } else {
+        toast('Aucun QR code trouvé sur cette photo', 'error');
+      }
+    };
+  });
   $('#man').onclick = manual;
   $('#chg')?.addEventListener('click', () => { S.ctx = null; LS.set('ctx', null); home(); });
 }
 
 async function camScan() {
-  if (!('BarcodeDetector' in window)) return toast('Scanner intégré non supporté : tapez le code table', 'info');
   const v = $('#vid');
-  const st = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } }).catch(() => null);
-  if (!st) return toast('Accès caméra refusé', 'error');
+  const cvs = $('#qr-cvs');
+  const st = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
+  }).catch(() => null);
+  if (!st) return toast('Accès caméra refusé ou indisponible', 'error');
   v.style.display = 'block';
   v.srcObject = st;
-  await v.play();
-  const det = new BarcodeDetector({ formats: ['qr_code'] });
-  const stop = () => st.getTracks().forEach(t => t.stop());
+  await v.play().catch(() => {});
+  const ctx = cvs ? cvs.getContext('2d', { willReadFrequently: true }) : null;
+  const stop = () => { st.getTracks().forEach(t => t.stop()); v.style.display = 'none'; };
   const loop = async () => {
-    if (!v.isConnected) return stop();
-    const r = await det.detect(v).catch(() => []);
-    if (r[0]) {
-      stop();
-      const raw = r[0].rawValue, t = raw.includes('q=') ? new URL(raw).searchParams.get('q') : raw;
-      try {
-        await scan(t);
-        location.hash = '#/menu';
-      } catch {
-        toast('QR invalide ou expiré', 'error');
-        home();
+    if (!v.isConnected || v.paused || v.ended) return stop();
+    if (v.readyState === v.HAVE_ENOUGH_DATA && ctx) {
+      cvs.width = v.videoWidth; cvs.height = v.videoHeight;
+      ctx.drawImage(v, 0, 0, cvs.width, cvs.height);
+      const img = ctx.getImageData(0, 0, cvs.width, cvs.height);
+      let found = null;
+      if (window.jsQR) {
+        const r = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+        if (r?.data) found = r.data;
       }
-    } else {
-      requestAnimationFrame(loop);
+      if (!found && 'BarcodeDetector' in window) {
+        try {
+          const det = new BarcodeDetector({ formats: ['qr_code'] });
+          const r = await det.detect(v);
+          if (r[0]) found = r[0].rawValue;
+        } catch {}
+      }
+      if (found) {
+        stop();
+        const t = found.includes('q=') ? (new URL(found, 'http://x').searchParams.get('q') || found) : found;
+        try {
+          await scan(t);
+          location.hash = '#/menu';
+          return;
+        } catch {
+          toast('QR invalide ou expiré', 'error');
+          return home();
+        }
+      }
     }
+    requestAnimationFrame(loop);
   };
-  loop();
+  requestAnimationFrame(loop);
 }
 
 async function manual() {
@@ -580,9 +623,15 @@ function menu() {
               <button class="rd" data-a="${p.id}" ${p.available ? '' : 'disabled'} aria-label="Ajouter">+</button>
             `}
           </div>
-        </div>
-      `).join('')}
     ` : '').join('')}
+
+    ${!S.products.length ? `
+      <div class="card" style="text-align:center;padding:36px 16px;margin-top:14px">
+        <span class="material-symbols-outlined text-[44px]" style="color:var(--tx-muted)">storefront</span>
+        <b style="display:block;margin-top:10px;font-size:1.1rem">Aucun produit au menu pour le moment</b>
+        <p class="muted" style="margin:4px 0 0">Le vendeur n'a pas encore ajouté d'articles pour cet établissement.</p>
+      </div>
+    ` : ''}
 
     ${n ? `
       <div class="bar">

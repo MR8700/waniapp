@@ -220,7 +220,54 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
   // ÉTABLISSEMENTS / ZONES / POINTS / QR
   const estOk = id => { const e = one("SELECT * FROM establishments WHERE id=? AND status='ACTIVE'", id); if (!e) throw new E(404, 'ESTABLISHMENT_UNAVAILABLE'); return e; };
   on('GET', '/establishments', true, () => q("SELECT id,name FROM establishments WHERE status='ACTIVE'"));
+  on('GET', '/establishments/public', false, () => {
+    return q("SELECT id,name,status FROM establishments WHERE status='ACTIVE'").map(e => ({
+      ...e,
+      points: q("SELECT p.id,p.code,p.label,z.name zone FROM reception_points p JOIN zones z ON z.id=p.zone_id WHERE p.establishment_id=? AND p.active=1 ORDER BY p.code", e.id)
+    }));
+  });
+  on('POST', '/establishments', true, c => {
+    const name = String(c.body.name || '').trim().slice(0, 80);
+    if (!name) throw new E(400, 'NAME_REQUIRED');
+    const id = uid();
+    run('INSERT INTO establishments VALUES(?,?,?,?)', id, name, 'ACTIVE', now());
+    run('INSERT INTO establishment_members VALUES(?,?,?)', c.user.id, id, 'MANAGER');
+    const zid = uid();
+    run('INSERT INTO zones VALUES(?,?,?,?)', zid, id, 'Salle & Terrasse', 0);
+    audit(c, 'ESTABLISHMENT_CREATED', 'establishment', id, { name });
+    return { status: 201, body: { id, name, default_zone_id: zid } };
+  });
+  on('PATCH', '/establishments/:id', true, c => {
+    need(c, c.params.id, 'MANAGER');
+    const e = one('SELECT * FROM establishments WHERE id=?', c.params.id);
+    if (!e) throw new E(404, 'NOT_FOUND');
+    const name = c.body.name ? String(c.body.name).trim().slice(0, 80) : e.name;
+    const status = c.body.status && ['ACTIVE', 'PAUSED'].includes(c.body.status) ? c.body.status : e.status;
+    run('UPDATE establishments SET name=?,status=? WHERE id=?', name, status, e.id);
+    return { ok: true, id: e.id, name, status };
+  });
   on('GET', '/establishments/:id', true, c => estOk(c.params.id));
+  on('GET', '/establishments/:id/points', true, c => {
+    return q('SELECT p.id,p.code,p.label,p.active,z.name zone,t.token FROM reception_points p JOIN zones z ON z.id=p.zone_id LEFT JOIN qr_tokens t ON t.reception_point_id=p.id AND t.active=1 WHERE p.establishment_id=? ORDER BY p.code', c.params.id);
+  });
+  on('POST', '/establishments/:id/points', true, c => {
+    need(c, c.params.id, 'MANAGER');
+    let zone = c.body.zone_id ? one('SELECT * FROM zones WHERE id=? AND establishment_id=?', c.body.zone_id, c.params.id) : null;
+    if (!zone) {
+      zone = one('SELECT * FROM zones WHERE establishment_id=? ORDER BY sort LIMIT 1', c.params.id);
+      if (!zone) {
+        const zid = uid();
+        run('INSERT INTO zones VALUES(?,?,?,?)', zid, c.params.id, 'Salle & Terrasse', 0);
+        zone = { id: zid };
+      }
+    }
+    const id = uid(), token = rand(16);
+    const code = String(c.body.code || ('T' + rand(4).toUpperCase())).trim().slice(0, 15);
+    const label = String(c.body.label || code).trim().slice(0, 40);
+    run('INSERT INTO reception_points VALUES(?,?,?,?,?,1)', id, c.params.id, zone.id, code, label);
+    run('INSERT INTO qr_tokens VALUES(?,?,1,NULL,?)', token, id, now());
+    return { status: 201, body: { id, code, label, token, zone_id: zone.id } };
+  });
   on('GET', '/establishments/:id/zones', true, c => { estOk(c.params.id); return q('SELECT * FROM zones WHERE establishment_id=? ORDER BY sort', c.params.id).map(z => ({ ...z, points: q('SELECT id,code,label FROM reception_points WHERE zone_id=? AND active=1 ORDER BY code', z.id) })); });
   on('GET', '/reception-points/:id', true, c => { const p = one('SELECT p.*,z.name zone_name FROM reception_points p JOIN zones z ON z.id=p.zone_id WHERE p.id=?', c.params.id); if (!p) throw new E(404, 'NOT_FOUND'); estOk(p.establishment_id); return p; });
   function resolveQr(token) {
@@ -288,6 +335,13 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
     }
     run('UPDATE products SET name=?,description=?,price=?,available=?,status=?,updated_at=? WHERE id=?', b.name ?? p.name, b.description ?? p.description, b.price ?? p.price, b.available === undefined ? p.available : +!!b.available, b.status ?? p.status, now(), p.id);
     broadcast('STOCK_UPDATE', { product_id: p.id, available: b.available !== undefined ? +!!b.available : p.available, price: b.price ?? p.price, establishment_id: p.establishment_id });
+    return { ok: true };
+  });
+  on('DELETE', '/products/:id', true, c => {
+    const p = one('SELECT * FROM products WHERE id=?', c.params.id); if (!p) throw new E(404, 'NOT_FOUND'); need(c, p.establishment_id, 'MANAGER');
+    run("UPDATE products SET status='ARCHIVED',updated_at=? WHERE id=?", now(), p.id);
+    audit(c, 'PRODUCT_ARCHIVED', 'product', p.id);
+    broadcast('STOCK_UPDATE', { product_id: p.id, available: 0, establishment_id: p.establishment_id });
     return { ok: true };
   });
 
@@ -567,7 +621,10 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
       if (!r) {
         // Sécurisation stricte contre le Path Traversal
         if (webDir && req.method === 'GET') {
-          const safeRoot = resolve(webDir);
+          const hostHeader = String(req.headers['host'] || '').toLowerCase();
+          const isVendorSubdomain = hostHeader.startsWith('vendeur.') || hostHeader.startsWith('pro.');
+          const vendorDir = join(resolve(webDir), '..', 'web-vendeur');
+          const safeRoot = isVendorSubdomain && existsSync(vendorDir) ? resolve(vendorDir) : resolve(webDir);
           let reqPath = '/';
           try {
             reqPath = decodeURIComponent(url.pathname);
