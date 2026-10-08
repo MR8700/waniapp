@@ -355,26 +355,16 @@ function renderOrders() {
               </div>
             </div>
 
-            <!-- Actions Vendeur Rapides -->
+            <!-- Actions Vendeur Directes -->
             <div class="row" style="gap:8px;flex-wrap:wrap">
               ${o.status === 'SUBMITTED' ? `
-                <button class="ok sm" data-status-btn="${o.id}:RECEIVED" style="flex:1">
+                <button class="ok sm" data-status-btn="${o.id}:RECEIVED" style="flex:1;background:#059669;color:#fff">
                   ✓ Confirmer (Reçue)
                 </button>
               ` : ''}
               ${o.status === 'RECEIVED' ? `
-                <button class="sm" data-status-btn="${o.id}:PREPARING" style="background:#0284c7;color:#fff;flex:1">
-                  🍳 En préparation
-                </button>
-              ` : ''}
-              ${o.status === 'PREPARING' ? `
-                <button class="sm" data-status-btn="${o.id}:READY" style="background:#059669;color:#fff;flex:1">
-                  🚀 Servir à table
-                </button>
-              ` : ''}
-              ${o.status === 'READY' || o.status === 'DELIVERED' ? `
-                <button class="sm ok" data-pay-btn="${o.id}:${o.total}" style="flex:1">
-                  💳 Encaisser (${fcfa(o.total)})
+                <button class="sm ok" data-pay-btn="${o.id}:${o.total}" style="flex:1;background:#0f766e;color:#fff">
+                  💳 Encaisser &amp; Clôturer (${fcfa(o.total)})
                 </button>
               ` : ''}
               <button class="sec sm" data-cancel-btn="${o.id}" style="color:var(--er)">Refuser</button>
