@@ -148,10 +148,7 @@ function statusLabel(s) {
   switch (s) {
     case 'SUBMITTED': return '⏳ Commande envoyée — En attente du vendeur';
     case 'RECEIVED': return '🔔 Reçue par le vendeur !';
-    case 'PREPARING': return '🍳 En préparation en cuisine / au bar';
-    case 'READY': return '🚀 Prête ! En cours de service';
-    case 'DELIVERED': return '✅ Livrée à votre table !';
-    case 'COMPLETED': return '🎉 Commande terminée';
+    case 'COMPLETED': return '🎉 Commande servie & terminée';
     case 'CANCELLED': return '❌ Commande annulée';
     case 'REJECTED': return '❌ Commande refusée par l\'établissement';
     default: return s;
@@ -676,15 +673,14 @@ async function track() {
 
   const st = S.activeOrder.status;
 
-  // Calcul état d'avancement
+  // Calcul état d'avancement direct
   const steps = [
-    { key: 'SUBMITTED', label: 'Envoyée', desc: 'En attente de prise en charge par le vendeur' },
-    { key: 'RECEIVED', label: 'Reçue par le vendeur', desc: 'Le vendeur a confirmé la commande' },
-    { key: 'PREPARING', label: 'En préparation', desc: 'Au bar / En cuisine' },
-    { key: 'READY', label: 'Prête & Servie', desc: 'Votre commande arrive à votre table' }
+    { key: 'SUBMITTED', label: '1. Envoyée', desc: 'En attente de prise en charge par le vendeur' },
+    { key: 'RECEIVED', label: '2. Reçue par le vendeur', desc: 'Confirmée ! Votre commande arrive à votre table' },
+    { key: 'COMPLETED', label: '3. Servie & Terminée', desc: 'Commande servie avec succès' }
   ];
 
-  const orderLevels = { SUBMITTED: 1, RECEIVED: 2, PREPARING: 3, READY: 4, DELIVERED: 4, COMPLETED: 5 };
+  const orderLevels = { SUBMITTED: 1, RECEIVED: 2, PREPARING: 2, READY: 2, DELIVERED: 2, COMPLETED: 3 };
   const currentLevel = orderLevels[st] || 1;
 
   shell('Suivi Commande', `
