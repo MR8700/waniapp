@@ -14,7 +14,7 @@ const ST = {
   SUBMITTED: 'Envoyée (En attente)', RECEIVED: 'Reçue par le vendeur', PREPARING: 'En préparation',
   READY: 'Prête', DELIVERING: 'En livraison', DELIVERED: 'Livrée à table', COMPLETED: 'Terminée'
 };
-const FLOW = ['SUBMITTED', 'RECEIVED', 'PREPARING', 'READY', 'DELIVERING', 'DELIVERED', 'COMPLETED'];
+const FLOW = ['SUBMITTED', 'RECEIVED', 'COMPLETED'];
 
 const S = {
   tok: null,
@@ -802,9 +802,8 @@ async function track() {
         </div>
         <div class="row muted" style="font-size:0.75rem;justify-content:space-between">
           <span>Envoyée</span>
-          <span>En cuisine</span>
-          <span>Prête</span>
-          <span>Livrée</span>
+          <span>Reçue par le vendeur</span>
+          <span>Servie &amp; Terminée</span>
         </div>
 
         <div style="background:#f8fafc;padding:12px;border-radius:12px;border:1px solid var(--bd);margin-top:6px">
@@ -1067,22 +1066,19 @@ async function staff() {
               </span>
             </div>
 
-            <!-- Actions Barman Tactiles 3D -->
+            <!-- Actions Barman Directes -->
             <div class="row" style="gap:8px;margin-top:4px">
-              ${o.status !== 'DELIVERED' ? `
-                <button class="ok big" data-st="${o.id}:DELIVERED" style="flex:2">
-                  <span class="material-symbols-outlined text-[20px]">check_circle</span> Servi à Table ✓
+              ${o.status === 'SUBMITTED' ? `
+                <button class="ok big" data-st="${o.id}:RECEIVED" style="flex:2">
+                  <span class="material-symbols-outlined text-[20px]">check_circle</span> Confirmer (Reçue) ✓
                 </button>
               ` : `
                 <button class="ok big" data-st="${o.id}:COMPLETED" style="flex:2" ${o.payment_status === 'PAID' ? '' : 'disabled'}>
                   ✓ Clôturer la table
                 </button>
               `}
-              ${NEXT[o.status] && NEXT[o.status] !== 'DELIVERED' ? `
-                <button class="sec sm" data-st="${o.id}:${NEXT[o.status]}" style="flex:1">
-                  → ${ST[NEXT[o.status]]}
-                </button>
-              ` : ''}
+              <button class="sec sm" data-pay="${o.id}" style="flex:1">Encaisser</button>
+            </div>
               ${o.status === 'SUBMITTED' ? `
                 <button class="dng sm" data-st="${o.id}:REJECTED">Refuser</button>
               ` : ''}
