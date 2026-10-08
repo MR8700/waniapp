@@ -1,1530 +1,854 @@
-import { KeyStore as K } from './keystore.js';
+/**
+ * WANI Client — Application Mobile-First de Commande à Table & Emporté
+ * Zéro mot de passe · Scanner QR Universel (jsQR) · Suivi en direct (SSE)
+ */
 
-const $ = document.querySelector.bind(document), app = $('#app');
-const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-const fcfa = n => new Intl.NumberFormat('fr-FR').format(n) + ' FCFA';
-const EMO = { Boissons: '🍺', Grillades: '🍗', Accompagnements: '🍌', Plats: '🍛', Desserts: '🍨', Autres: '🍽️' };
+import { API_BASE } from './config.js';
+import * as KS from './keystore.js';
+
+const $ = sel => document.querySelector(sel);
+const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+const fcfa = n => (Number(n) || 0).toLocaleString('fr-FR') + ' FCFA';
+const app = $('#app');
+
 const LS = {
-  get: (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } },
-  set: (k, v) => localStorage.setItem(k, JSON.stringify(v))
+  get: (k, d = null) => { try { const v = localStorage.getItem('wc_' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
+  set: (k, v) => { try { localStorage.setItem('wc_' + k, JSON.stringify(v)); } catch {} },
+  del: k => { try { localStorage.removeItem('wc_' + k); } catch {} }
 };
-
-const ST = {
-  EXPIRED: 'Expirée', REJECTED: 'Refusée', CANCELLED: 'Annulée',
-  SUBMITTED: 'Envoyée (En attente)', RECEIVED: 'Reçue par le vendeur', PREPARING: 'En préparation',
-  READY: 'Prête', DELIVERING: 'En livraison', DELIVERED: 'Livrée à table', COMPLETED: 'Terminée'
-};
-const FLOW = ['SUBMITTED', 'RECEIVED', 'COMPLETED'];
 
 const S = {
-  tok: null,
+  tokens: LS.get('auth', null),
   me: null,
-  ctx: LS.get('ctx', null),
+  ctx: LS.get('table_ctx', null), // { establishment, zone, point, token }
+  venues: [],
+  cats: [],
+  products: [],
+  cat: '',
   cart: LS.get('cart', {}),
-  products: LS.get('menu', []),
-  cats: LS.get('cats', []),
-  pending: LS.get('pending', null),
-  voice: null,
-  poll: null,
-  cat: null,
-  serviceOpen: LS.get('serviceOpen', true),
-  eventSource: null
+  activeOrder: LS.get('order', null),
+  orderStatus: LS.get('order_status', null),
+  stream: null
 };
 
-// Synthétiseur de carillon sonore Web Audio (0 latence, 100% natif)
-function playOrderChime() {
-  try {
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const now = ctx.currentTime;
-    const osc1 = ctx.createOscillator();
-    const osc2 = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc1.type = 'sine';
-    osc1.frequency.setValueAtTime(587.33, now); // D5
-    osc2.type = 'sine';
-    osc2.frequency.setValueAtTime(880, now + 0.14); // A5
-
-    gain.gain.setValueAtTime(0.25, now);
-    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.65);
-
-    osc1.connect(gain);
-    osc2.connect(gain);
-    gain.connect(ctx.destination);
-
-    osc1.start(now);
-    osc1.stop(now + 0.14);
-    osc2.start(now + 0.14);
-    osc2.stop(now + 0.65);
-  } catch {}
-}
-
-const toast = (m, isIcon = 'check_circle') => {
-  const existing = $('.toast');
-  if (existing) existing.remove();
-  const t = document.createElement('div');
-  t.className = 'toast';
-  t.innerHTML = `<span class="material-symbols-outlined text-[20px]" style="color:#10b981">${isIcon}</span><span>${esc(m)}</span>`;
-  document.body.append(t);
-  setTimeout(() => t.remove(), 3200);
-};
-
-// ---------- API + authentification par clé d'appareil ----------
-async function raw(method, path, body, headers = {}) {
-  const r = await fetch(path, {
+// ==========================================
+// CLIENT API & AUTHENTIFICATION SANS MOT DE PASSE
+// ==========================================
+async function raw(method, path, body = null, token = null) {
+  const h = { 'content-type': 'application/json' };
+  if (token) h['authorization'] = 'Bearer ' + token;
+  const res = await fetch(API_BASE + path, {
     method,
-    headers: {
-      'content-type': 'application/json',
-      ...(S.tok ? { authorization: 'Bearer ' + S.tok } : {}),
-      ...headers
-    },
+    headers: h,
     body: body ? JSON.stringify(body) : undefined
   });
-  const j = await r.json().catch(() => ({}));
-  if (!r.ok) throw Object.assign(new Error(j.error || r.status), { status: r.status, code: j.error });
-  return j;
+  const text = await res.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch {}
+  if (!res.ok) {
+    const err = new Error(json?.message || `Erreur ${res.status}`);
+    err.code = json?.code;
+    err.status = res.status;
+    throw err;
+  }
+  return json;
 }
 
-// Modal de saisie du Code de Secours en cas de défaillance biométrique
-function promptBackupCodeModal() {
-  return new Promise(resolve => {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.innerHTML = `
-      <div class="modal-content">
-        <div style="width:52px;height:52px;border-radius:50%;background:#ffdbce;color:var(--p);display:grid;place-items:center;margin:0 auto 12px">
-          <span class="material-symbols-outlined text-[28px]">lock_reset</span>
-        </div>
-        <h2 style="margin:0 0 6px">Code de Secours</h2>
-        <p class="muted" style="margin:0 0 16px">Biométrie indisponible. Saisissez votre code PIN de secours à 6 chiffres.</p>
-        <input id="modal-pin" type="tel" maxlength="6" pattern="[0-9]*" class="pin-display" placeholder="••••••" autocomplete="one-time-code" autofocus>
-        <p id="modal-err" style="color:var(--er);font-size:0.85rem;margin:6px 0 12px;min-height:20px"></p>
-        <div class="row">
-          <button class="sec" id="modal-cancel" style="flex:1">Annuler</button>
-          <button class="ok" id="modal-ok" style="flex:1">Déverrouiller</button>
-        </div>
-      </div>
-    `;
-    document.body.append(overlay);
-    const pinInput = overlay.querySelector('#modal-pin');
-    pinInput.focus();
-
-    overlay.querySelector('#modal-cancel').onclick = () => {
-      overlay.remove();
-      resolve(null);
-    };
-
-    const submit = () => {
-      const val = pinInput.value.trim().replace(/\D/g, '');
-      if (val.length < 6) {
-        overlay.querySelector('#modal-err').textContent = 'Veuillez saisir les 6 chiffres';
-        return;
-      }
-      overlay.remove();
-      resolve(val);
-    };
-
-    overlay.querySelector('#modal-ok').onclick = submit;
-    pinInput.onkeyup = e => { if (e.key === 'Enter') submit(); };
-  });
-}
-
-async function login() {
+async function api(method, path, body = null) {
+  if (!S.tokens?.access) throw new Error('NON_AUTHENTIFIE');
   try {
-    await K.unlock(promptBackupCodeModal);
+    return await raw(method, path, body, S.tokens.access);
   } catch (err) {
-    if (String(err.message).startsWith('LOCKOUT:')) {
-      toast(err.message, 'error');
-    } else if (err.message === 'INVALID_BACKUP_CODE') {
-      toast('Code de secours incorrect', 'error');
+    if (err.status === 401 && S.tokens.refresh) {
+      await refresh();
+      return await raw(method, path, body, S.tokens.access);
     }
     throw err;
   }
-
-  const id = localStorage.getItem('device_id');
-  if (!id) throw new Error('NO_DEVICE_ID');
-  const { nonce } = await raw('POST', '/auth/device/challenge', { device_id: id });
-  const signature = await K.sign(`auth|${id}|${nonce}`);
-  S.tok = (await raw('POST', '/auth/device/verify', { device_id: id, nonce, signature })).access_token;
-  initRealtime();
 }
 
-async function api(method, path, body, headers) {
+async function refresh() {
+  if (!S.tokens?.refresh) throw new Error('SESSION_EXPIREE');
   try {
-    return await raw(method, path, body, headers);
+    const r = await raw('POST', '/auth/session/refresh', { refresh_token: S.tokens.refresh });
+    S.tokens = { access: r.access_token, refresh: r.refresh_token };
+    LS.set('auth', S.tokens);
   } catch (e) {
-    if (e.status === 401 && localStorage.getItem('device_id')) {
-      await login();
-      return raw(method, path, body, headers);
-    }
+    S.tokens = null;
+    LS.del('auth');
     throw e;
   }
 }
 
-async function register(name, invite_code) {
-  const public_key = await K.create();
-  const ts = Date.now();
-  const pop = await K.sign(`register|${public_key}|${ts}`);
-  const ua = navigator.userAgent;
-  const platform = /Android/.test(ua) ? 'android' : /iPhone|iPad/.test(ua) ? 'ios' : 'web';
-  try {
-    const r = await raw('POST', '/auth/device/register', {
-      public_key,
-      pop,
-      ts,
-      display_name: name,
-      invite_code: invite_code || undefined,
-      device_name: platform === 'web' ? 'Navigateur Sécurisé' : platform,
-      platform
-    });
-    localStorage.setItem('device_id', r.device_id);
-  } catch (e) {
-    await K.wipe();
-    throw e;
-  }
+async function register(displayName) {
+  const pk = await KS.getPublicKeyBase64();
+  const did = await KS.getDeviceId();
+  const regSig = await KS.signAuth(`register|${did}|${pk}`);
+  const r = await raw('POST', '/auth/device/register', {
+    device_id: did,
+    public_key: pk,
+    device_name: 'Mobile Client',
+    platform: 'web',
+    display_name: displayName || 'Client',
+    registration_signature: regSig
+  });
+  return r;
 }
 
-const online = () => navigator.onLine;
+async function login() {
+  const did = await KS.getDeviceId();
+  const ch = await raw('POST', '/auth/device/challenge', { device_id: did });
+  const sig = await KS.signAuth(`auth|${did}|${ch.nonce}`);
+  const r = await raw('POST', '/auth/device/verify', {
+    device_id: did,
+    nonce: ch.nonce,
+    signature: sig
+  });
+  S.tokens = { access: r.access_token, refresh: r.refresh_token };
+  LS.set('auth', S.tokens);
+  await loadMe();
+}
 
-// ---------- TEMPS RÉEL (SSE + Polling Fallback) ----------
-function initRealtime() {
-  if (S.eventSource) {
-    try { S.eventSource.close(); } catch {}
-  }
-  if (!S.tok) return;
+async function loadMe() {
+  if (!S.tokens?.access) return;
+  S.me = await api('GET', '/me');
+}
 
+// ==========================================
+// TEMPS RÉEL (SSE)
+// ==========================================
+function connectSse() {
+  if (S.stream || !S.tokens?.access) return;
+  const url = `${API_BASE}/events?token=${encodeURIComponent(S.tokens.access)}`;
   try {
-    const es = new EventSource('/events?token=' + encodeURIComponent(S.tok));
-    S.eventSource = es;
-
-    es.addEventListener('NEW_ORDER', e => {
-      try {
-        const data = JSON.parse(e.data);
-        const est = S.me?.memberships?.[0]?.establishment_id;
-        if (est && String(data.establishment_id) === String(est)) {
-          playOrderChime();
-          toast(`Nouvelle commande Table ${data.order?.point?.code || ''}`, 'notifications_active');
-          if (location.hash === '#/staff' || location.hash === '#/manager') {
-            route();
-          }
-        }
-      } catch {}
-    });
-
+    const es = new EventSource(url);
+    S.stream = es;
     es.addEventListener('ORDER_STATUS', e => {
       try {
-        const data = JSON.parse(e.data);
-        const last = LS.get('lastOrder');
-        if (last && String(last) === String(data.order_id)) {
-          toast(`Commande mise à jour : ${ST[data.status] || data.status}`, 'sync');
-          if (location.hash === '#/order') route();
+        const d = JSON.parse(e.data);
+        if (S.activeOrder && d.order_id === S.activeOrder.id) {
+          S.activeOrder.status = d.status;
+          S.orderStatus = d.status;
+          LS.set('order', S.activeOrder);
+          LS.set('order_status', d.status);
+          toast(statusLabel(d.status), 'info');
+          if (location.hash === '#/order') track();
         }
-        if (location.hash === '#/staff' || location.hash === '#/manager') route();
       } catch {}
     });
-
-    es.addEventListener('ORDER_PAID', () => {
-      if (location.hash === '#/staff' || location.hash === '#/order' || location.hash === '#/manager') route();
-    });
-
-    es.addEventListener('STOCK_UPDATE', () => {
-      loadMenu().then(() => {
-        if (location.hash === '#/menu' || location.hash === '#/manager') route();
-      });
-    });
-
     es.onerror = () => {
-      // Reconnexion automatique assurée par le navigateur
+      es.close();
+      S.stream = null;
+      setTimeout(connectSse, 5000);
     };
   } catch {}
 }
 
-// ---------- DONNÉES ----------
-async function loadMenu() {
-  if (!S.ctx) return;
-  try {
-    const [p, c] = await Promise.all([
-      api('GET', '/products?establishment_id=' + S.ctx.establishment.id),
-      api('GET', '/categories?establishment_id=' + S.ctx.establishment.id)
-    ]);
-    S.products = p;
-    S.cats = c;
-    LS.set('menu', S.products);
-    LS.set('cats', S.cats);
-  } catch {}
+function statusLabel(s) {
+  switch (s) {
+    case 'SUBMITTED': return '⏳ Commande envoyée — En attente du vendeur';
+    case 'RECEIVED': return '🔔 Reçue par le vendeur !';
+    case 'COMPLETED': return '🎉 Commande servie & terminée';
+    case 'CANCELLED': return '❌ Commande annulée';
+    case 'REJECTED': return '❌ Commande refusée par l\'établissement';
+    default: return s;
+  }
 }
 
-async function scan(token) {
-  const c = await raw('GET', '/qr/' + encodeURIComponent(token));
-  S.ctx = { ...c, token };
-  LS.set('ctx', S.ctx);
-  S.cart = {};
-  LS.set('cart', {});
-  await loadMenu();
+// ==========================================
+// NOTIFICATIONS ET INTERFACE
+// ==========================================
+function toast(msg, type = 'ok') {
+  const d = document.createElement('div');
+  d.className = `toast ${type}`;
+  d.textContent = msg;
+  document.body.appendChild(d);
+  setTimeout(() => d.remove(), 3400);
 }
 
-const cartLines = () => Object.entries(S.cart).map(([id, q]) => ({ p: S.products.find(p => p.id === id), q })).filter(l => l.p && l.q > 0);
-const total = () => cartLines().reduce((a, l) => a + l.p.price * l.q, 0);
-const setQ = (id, d) => {
-  S.cart[id] = Math.max(0, Math.min(99, (S.cart[id] || 0) + d));
-  if (!S.cart[id]) delete S.cart[id];
-  LS.set('cart', S.cart);
-};
-
-// ---------- VUES & SHELL 3D ----------
-const shell = (title, body, tab, sub = '') => {
-  const staff = S.me?.memberships?.some(m => m.role !== 'CLIENT'),
-        mgr = S.me?.memberships?.some(m => m.role === 'MANAGER') || S.me?.is_admin,
-        isAdmin = !!S.me?.is_admin;
-
+function shell(title, body, active = '') {
   app.innerHTML = `
-    ${online() ? '' : '<div style="background:#fff7ed;color:#9a3412;padding:8px 16px;font-size:0.85rem;font-weight:700;text-align:center;border-bottom:1px solid #fed7aa">Hors connexion — consultation hors ligne active</div>'}
-    <header>
-      <div>
-        <h1>
-          <span class="material-symbols-outlined brand-icon">sports_bar</span>
-          ${esc(title)}
-          ${S.ctx && tab === 'menu' ? '<span class="open-pill">Ouvert</span>' : ''}
-        </h1>
-        <small>${esc(sub)}</small>
+    <header class="app-header">
+      <div class="row" style="width:100%;justify-content:space-between;align-items:center">
+        <div class="row" style="gap:8px;align-items:center">
+          <div style="width:34px;height:34px;border-radius:10px;background:var(--p);color:#fff;display:grid;place-items:center;font-weight:900;font-family:var(--hd);font-size:1.1rem">W</div>
+          <b class="hd" style="font-size:1.15rem">${esc(title)}</b>
+        </div>
+        ${S.ctx ? `<span class="pill" style="font-size:0.75rem">${esc(S.ctx.point?.label || S.ctx.establishment?.name)}</span>` : ''}
       </div>
-      <div class="av">${esc((S.me?.display_name || '?')[0]?.toUpperCase())}</div>
     </header>
-    <main>${body}</main>
-    <nav>
-      ${[
-        ['#/', 'deck', 'Accueil', 'home'],
-        ['#/menu', 'restaurant_menu', 'Menu', 'menu'],
-        ['#/order', 'receipt_long', 'Ma Table', 'order'],
-        staff ? ['#/staff', 'notifications_active', 'Barman', 'staff'] : null,
-        mgr ? ['#/manager', 'query_stats', 'Gérant', 'manager'] : null,
-        isAdmin ? ['#/admin', 'admin_panel_settings', 'Admin', 'admin'] : null,
-        ['#/profile', 'lock', 'Sécurité', 'profile']
-      ].filter(Boolean).map(([h, i, l, t]) => `
-        <a href="${h}" class="${t === tab ? 'on' : ''}">
-          <span class="material-symbols-outlined nav-icon">${i}</span>
-          <span>${l}</span>
-        </a>
-      `).join('')}
+    <main class="col" style="padding-top:14px;padding-bottom:24px">${body}</main>
+    <nav class="nav">
+      <a href="#/" class="${active === 'home' ? 'on' : ''}">
+        <span class="material-symbols-outlined">home</span>Accueil
+      </a>
+      <a href="#/menu" class="${active === 'menu' ? 'on' : ''}">
+        <span class="material-symbols-outlined">restaurant_menu</span>Menu
+      </a>
+      <a href="#/order" class="${active === 'order' ? 'on' : ''}">
+        <span class="material-symbols-outlined">receipt_long</span>Ma Commande
+      </a>
+      <a href="#/profile" class="${active === 'profile' ? 'on' : ''}">
+        <span class="material-symbols-outlined">account_circle</span>Mon Profil
+      </a>
     </nav>
   `;
-};
+}
 
-const ctxLine = () => S.ctx ? `${S.ctx.establishment.name} · ${S.ctx.point.label} · ${S.ctx.zone}` : 'Aucune table sélectionnée';
-
-// ÉCRAN DE BIENVENUE : L'appareil est la clé d'accès (sans mot de passe)
+// ==========================================
+// ÉCRAN 1 : BIENVENUE & CONNEXION RAPIDE (ZÉRO JARGON)
+// ==========================================
 function welcome(err = '') {
   app.innerHTML = `
-    <main class="col" style="padding-top:36px;text-align:center">
-      <div style="width:72px;height:72px;margin:0 auto 10px;border-radius:50%;background:linear-gradient(135deg,#ffdbce,#fed7aa);display:grid;place-items:center;box-shadow:0 8px 20px rgba(194,65,12,0.25);border:2px solid #fff">
-        <span class="material-symbols-outlined text-[36px]" style="color:var(--p)">sports_bar</span>
-      </div>
-      <h1 style="font-size:2rem;font-weight:900;justify-content:center;color:var(--tx);letter-spacing:-0.5px">WANI</h1>
-      <div style="font-size:0.85rem;color:var(--p);font-weight:700;margin:-6px auto 10px;text-transform:uppercase;letter-spacing:1px">Emmener · Commander · Servir</div>
-      <div class="badge g" style="margin:0 auto 12px;font-size:0.75rem">Connexion instantanée</div>
-      <p class="muted" style="margin:0 auto 20px;max-width:380px;line-height:1.5">
-        <strong>Votre appareil vous reconnaît automatiquement.</strong> Aucun mot de passe à retenir ni à taper. Commandez directement en toute simplicité.
-      </p>
-      <div class="card col" style="text-align:left">
-        <label class="muted" style="font-weight:700">Votre Nom ou Prénom</label>
-        <input id="n" placeholder="Ex : Oumar, Fatou, Client..." autocomplete="given-name">
-        <label class="muted" style="font-weight:700;margin-top:4px">Code d'équipe / gérant (facultatif)</label>
-        <input id="c" placeholder="Code d'association (ex: XXXXX-XXXXX)" autocapitalize="characters">
-        <button class="big" id="go" style="margin-top:8px">Commencer &amp; Commander</button>
-        ${err ? `<p style="color:var(--er);margin:6px 0 0;font-size:0.85rem;font-weight:600">${esc(err)}</p>` : ''}
-      </div>
-      <details style="text-align:left;margin-top:12px;background:#fff;padding:12px;border-radius:12px;border:1px solid var(--bd)">
-        <summary class="muted" style="cursor:pointer;font-weight:700">Changement de téléphone ?</summary>
-        <p class="muted" style="font-size:0.82rem;margin:8px 0">Restaurez votre compte facilement sur votre nouvel appareil.</p>
-        <button class="sec sm" id="rec">Demander la restauration du compte</button>
-      </details>
-    </main>
-  `;
-
-  $('#go').onclick = async () => {
-    $('#go').disabled = true;
-    try {
-      await register($('#n').value.trim() || 'Client', $('#c').value.trim());
-      await login();
-      await bioOffer();
-    } catch (e) {
-      welcome(({ INVALID_INVITE: 'Code d’invitation invalide ou expiré', DEVICE_EXISTS: 'Appareil déjà enregistré' })[e.code] || 'Impossible de créer l’accès (' + e.message + ')');
-    }
-  };
-
-  $('#rec').onclick = async () => {
-    try {
-      const pk = await K.create(), ts = Date.now(), pop = await K.sign(`register|${pk}|${ts}`);
-      const r = await raw('POST', '/auth/recovery/request', {
-        public_key: pk, pop, ts,
-        device_name: 'Nouvel appareil',
-        platform: 'web',
-        claimed_name: $('#n')?.value || 'Client'
-      });
-      LS.set('recovery', r.request_id);
-      toast('Demande de récupération transmise : ' + r.request_id.slice(0, 8));
-      watchRecovery();
-    } catch (e) {
-      toast('Erreur ' + e.message, 'error');
-    }
-  };
-}
-
-function watchRecovery() {
-  const id = LS.get('recovery');
-  if (!id) return;
-  const t = setInterval(async () => {
-    const r = await raw('GET', '/auth/recovery/' + id).catch(() => null);
-    if (r?.status === 'APPROVED') {
-      clearInterval(t);
-      localStorage.setItem('device_id', r.device_id);
-      localStorage.removeItem('recovery');
-      await login();
-      start();
-    }
-  }, 4000);
-}
-
-// Configuration optionnelle de la biométrie + Génération du Code de Secours
-async function bioOffer() {
-  const info = await K.getProtectionInfo();
-  if (info.isProtected) return start();
-
-  const generatedCode = K.generateRandomBackupCode();
-  app.innerHTML = `
     <main class="col" style="padding-top:40px;text-align:center">
-      <div style="width:64px;height:64px;margin:0 auto 12px;border-radius:50%;background:#ecfdf5;color:#059669;display:grid;place-items:center;box-shadow:0 6px 16px rgba(5,150,105,0.25)">
-        <span class="material-symbols-outlined text-[32px]">fingerprint</span>
+      <div style="width:80px;height:80px;margin:0 auto 12px;border-radius:50%;background:linear-gradient(135deg,#ffdbce,#fed7aa);display:grid;place-items:center;box-shadow:0 8px 24px rgba(194,65,12,0.25);border:3px solid #fff">
+        <span class="material-symbols-outlined text-[42px]" style="color:var(--p)">sports_bar</span>
       </div>
-      <h1 style="font-size:1.6rem;justify-content:center">Protection de l'appareil</h1>
-      <p class="muted" style="margin:0 auto 16px;max-width:360px">
-        Activez la biométrie (Face ID / Empreinte) comme couche de protection optionnelle, accompagnée de votre <strong>code de secours</strong>.
+      <h1 style="font-size:2.2rem;font-weight:900;justify-content:center;color:var(--tx);letter-spacing:-0.5px">WANI</h1>
+      <div style="font-size:0.85rem;color:var(--p);font-weight:800;margin:-6px auto 14px;text-transform:uppercase;letter-spacing:1px">Emmener · Commander · Servir</div>
+      
+      <div class="badge g" style="margin:0 auto 14px;font-size:0.8rem">Connexion instantanée</div>
+      
+      <p class="muted" style="margin:0 auto 24px;max-width:360px;line-height:1.5">
+        <strong>Votre appareil vous reconnaît automatiquement.</strong> Aucun mot de passe à retenir. Vos commandes arrivent directement au bar ou en cuisine.
       </p>
+
       <div class="card col" style="text-align:left">
-        <div class="row">
-          <span style="font-weight:700">Code de secours généré :</span>
-          <span class="badge" style="font-size:1rem;letter-spacing:3px;font-family:var(--hd)">${generatedCode.slice(0,3)} ${generatedCode.slice(3)}</span>
-        </div>
-        <p class="muted" style="font-size:0.8rem;margin:4px 0">
-          Ce code à 6 chiffres est votre filet de sécurité pour déverrouiller la clé si le capteur biométrique échoue.
-        </p>
-        <button class="big ok" id="y" style="margin-top:6px">Activer la biométrie & Sauvegarder</button>
-        <button class="sec big" id="no">Continuer sans biométrie</button>
+        <label class="muted" style="font-weight:700">Votre Prénom ou Surnom</label>
+        <input id="name-in" placeholder="Ex: Oumar, Fatou, Alex..." autocomplete="given-name">
+        <button class="big" id="start-btn" style="margin-top:10px">Commencer &amp; Commander</button>
+        ${err ? `<p style="color:var(--er);margin:8px 0 0;font-size:0.85rem;font-weight:600">${esc(err)}</p>` : ''}
+      </div>
+
+      <div style="margin-top:20px;font-size:0.85rem;color:var(--tx-muted)">
+        💡 <em>Wani</em> signifie <strong>« emmener, venir avec »</strong> en mooré.
       </div>
     </main>
   `;
 
-  $('#y').onclick = async () => {
+  $('#start-btn').onclick = async () => {
+    $('#start-btn').disabled = true;
     try {
-      await K.enableProtection(S.me?.display_name, generatedCode);
-      toast('Biométrie & code de secours activés !');
-    } catch {
-      toast('Protection configurée avec le code de secours');
+      const name = $('#name-in').value.trim() || 'Client';
+      await register(name);
+      await login();
+      location.hash = '#/';
+      route();
+    } catch (e) {
+      welcome('Impossible d\'accéder (' + e.message + ')');
     }
-    start();
   };
-
-  $('#no').onclick = start;
 }
 
-// ACCUEIL : Scan QR caméra + Sélection manuelle
-function home() {
-  shell('Accueil', `
-    <div class="card tb">
-      <div class="table-icon">🪑</div>
-      <div style="flex:1">
-        <b class="hd" style="font-size:1.15rem">${esc(S.ctx ? S.ctx.point.label : 'Aucune table')}</b>
-        <div class="muted">${esc(S.ctx ? S.ctx.zone + ' • ' + S.ctx.establishment.name : 'Scannez le QR de votre table')}</div>
-      </div>
-      ${S.ctx ? '<span class="badge g">Connecté</span>' : '<span class="badge">En attente</span>'}
-    </div>
-    <div class="card col">
-      <button class="big" id="cam" style="display:flex;align-items:center;justify-content:center;gap:8px">
-        <span class="material-symbols-outlined text-[24px]">qr_code_scanner</span>
-        Scanner le QR de la table
-      </button>
-      <label class="btn sec sm" style="margin-top:6px;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer">
-        <span class="material-symbols-outlined text-[18px]">photo_camera</span>
-        Prendre une photo du QR
-        <input type="file" id="pic-qr" accept="image/*" capture="environment" style="display:none">
-      </label>
-      <video id="vid" playsinline muted style="display:none;width:100%;border-radius:14px;border:2px solid var(--p);box-shadow:0 8px 20px rgba(0,0,0,0.15)"></video>
-      <canvas id="qr-cvs" style="display:none"></canvas>
-      <div class="row" style="margin-top:6px">
-        <input id="code" placeholder="Code du token QR (ex: J04, S01...)">
-        <button class="sec sm" id="ok" style="width:110px">Valider</button>
-      </div>
-      <button class="sec sm" id="man" style="margin-top:4px">Choisir ma table dans la liste</button>
-      <div id="lst"></div>
-    </div>
-    ${S.ctx ? '<div class="row" style="margin-top:10px"><a class="btn big ok" href="#/menu">Voir le menu & Commander →</a><button class="sec sm" id="chg">Changer de table</button></div>' : ''}
-  `, 'home', 'Bonjour ' + (S.me?.display_name || ''));
+// ==========================================
+// ÉCRAN 2 : ACCUEIL & SCANNER UNIVERSEL (FONCTIONNE SUR TOUS LES APPAREILS)
+// ==========================================
+async function home() {
+  if (!S.me) return welcome();
+  connectSse();
 
-  $('#ok').onclick = async () => {
-    try {
-      await scan($('#code').value.trim());
+  let venuesHtml = '';
+  try {
+    const list = await raw('GET', '/establishments/public');
+    S.venues = list || [];
+  } catch {}
+
+  shell('WANI', `
+    <div class="card" style="text-align:center;padding:24px 16px">
+      <b style="font-size:1.2rem;display:block">Bonjour ${esc(S.me.user.display_name)} 👋</b>
+      <p class="muted" style="margin:4px 0 16px">
+        ${S.ctx ? `Vous êtes installé à : <strong>${esc(S.ctx.establishment?.name)} · ${esc(S.ctx.point?.label)}</strong>` : 'Scannez le QR code sur votre table pour voir la carte et commander.'}
+      </p>
+
+      <button class="big" id="open-cam-btn" style="width:100%;margin-bottom:10px;display:flex;align-items:center;justify-content:center;gap:8px">
+        <span class="material-symbols-outlined text-[24px]">qr_code_scanner</span>
+        Scanner le QR code de ma table
+      </button>
+
+      <label class="btn sec" style="width:100%;display:flex;align-items:center;justify-content:center;gap:6px;cursor:pointer">
+        <span class="material-symbols-outlined text-[20px]">photo_camera</span>
+        Prendre une photo du QR code
+        <input type="file" id="qr-file-input" accept="image/*" capture="environment" style="display:none">
+      </label>
+
+      ${S.ctx ? `
+        <div style="margin-top:16px;display:flex;gap:8px;justify-content:center">
+          <a class="btn ok" href="#/menu" style="flex:1">Voir le menu</a>
+          <button class="sec sm" id="clear-table-btn">Changer</button>
+        </div>
+      ` : ''}
+    </div>
+
+    <!-- Scanner Vidéo Intégré (affiché au clic) -->
+    <div id="cam-box" class="card" style="display:none;padding:12px;text-align:center">
+      <div style="position:relative;width:100%;max-width:360px;margin:0 auto;border-radius:12px;overflow:hidden;background:#000">
+        <video id="cam-video" style="width:100%;height:auto;display:block" playsinline muted autoplay></video>
+        <canvas id="cam-canvas" style="display:none"></canvas>
+        <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:200px;height:200px;border:3px solid var(--p);border-radius:16px;box-shadow:0 0 0 9999px rgba(0,0,0,0.4)"></div>
+      </div>
+      <p class="muted" style="margin:10px 0 6px;font-size:0.85rem">Pointez la caméra vers le QR code de la table</p>
+      <button class="sec sm" id="close-cam-btn">Fermer la caméra</button>
+    </div>
+
+    <!-- Choix direct sans scanner -->
+    <div class="card" style="margin-top:14px">
+      <b style="display:block;margin-bottom:8px">Ou choisissez votre lieu &amp; table directement :</b>
+      ${S.venues.length ? `
+        <div class="col" style="gap:8px">
+          ${S.venues.map(v => `
+            <details style="background:#fff;border:1px solid var(--bd);border-radius:10px;padding:8px 12px">
+              <summary style="font-weight:700;cursor:pointer">${esc(v.name)} (${(v.points || []).length} tables)</summary>
+              <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px">
+                ${(v.points || []).map(p => `
+                  <button class="sm sec" data-pick-venue="${v.id}" data-pick-point="${p.id}" data-point-name="${esc(p.label)}" data-venue-name="${esc(v.name)}">
+                    🪑 ${esc(p.label)}
+                  </button>
+                `).join('') || '<p class="muted" style="font-size:0.8rem">Aucun point de livraison configuré pour ce lieu.</p>'}
+              </div>
+            </details>
+          `).join('')}
+        </div>
+      ` : '<p class="muted" style="font-size:0.85rem">Aucun lieu de vente ouvert pour le moment.</p>'}
+    </div>
+  `, 'home');
+
+  $('#open-cam-btn')?.addEventListener('click', startScanner);
+  $('#close-cam-btn')?.addEventListener('click', stopScanner);
+  $('#qr-file-input')?.addEventListener('change', handleQrFile);
+  $('#clear-table-btn')?.addEventListener('click', () => {
+    S.ctx = null;
+    LS.del('table_ctx');
+    home();
+  });
+
+  app.querySelectorAll('[data-pick-venue]').forEach(b => {
+    b.onclick = async () => {
+      const vName = b.dataset.venueName, pName = b.dataset.pointName;
+      S.ctx = {
+        establishment: { id: b.dataset.pickVenue, name: vName },
+        point: { id: b.dataset.pickPoint, label: pName },
+        zone: 'Sur place'
+      };
+      LS.set('table_ctx', S.ctx);
+      toast(`Installé à : ${pName} (${vName})`);
       location.hash = '#/menu';
-    } catch {
-      toast('QR invalide ou expiré', 'error');
-    }
-  };
-  $('#cam').onclick = camScan;
-  $('#pic-qr')?.addEventListener('change', e => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const img = new Image();
-    img.src = URL.createObjectURL(file);
-    img.onload = () => {
-      const c = document.createElement('canvas');
-      c.width = img.width; c.height = img.height;
-      const cx = c.getContext('2d'); cx.drawImage(img, 0, 0);
-      const id = cx.getImageData(0, 0, c.width, c.height);
-      const res = window.jsQR ? window.jsQR(id.data, id.width, id.height) : null;
-      if (res?.data) {
-        const t = res.data.includes('q=') ? (new URL(res.data, 'http://x').searchParams.get('q') || res.data) : res.data;
-        scan(t).then(() => { location.hash = '#/menu'; }).catch(() => toast('QR invalide ou expiré', 'error'));
-      } else {
-        toast('Aucun QR code trouvé sur cette photo', 'error');
-      }
+      route();
     };
   });
-  $('#man').onclick = manual;
-  $('#chg')?.addEventListener('click', () => { S.ctx = null; LS.set('ctx', null); home(); });
 }
 
-async function camScan() {
-  const v = $('#vid');
-  const cvs = $('#qr-cvs');
-  const st = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
-  }).catch(() => null);
-  if (!st) return toast('Accès caméra refusé ou indisponible', 'error');
-  v.style.display = 'block';
-  v.srcObject = st;
-  await v.play().catch(() => {});
-  const ctx = cvs ? cvs.getContext('2d', { willReadFrequently: true }) : null;
-  const stop = () => { st.getTracks().forEach(t => t.stop()); v.style.display = 'none'; };
-  const loop = async () => {
-    if (!v.isConnected || v.paused || v.ended) return stop();
-    if (v.readyState === v.HAVE_ENOUGH_DATA && ctx) {
-      cvs.width = v.videoWidth; cvs.height = v.videoHeight;
-      ctx.drawImage(v, 0, 0, cvs.width, cvs.height);
-      const img = ctx.getImageData(0, 0, cvs.width, cvs.height);
-      let found = null;
-      if (window.jsQR) {
-        const r = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
-        if (r?.data) found = r.data;
-      }
-      if (!found && 'BarcodeDetector' in window) {
-        try {
-          const det = new BarcodeDetector({ formats: ['qr_code'] });
-          const r = await det.detect(v);
-          if (r[0]) found = r[0].rawValue;
-        } catch {}
-      }
-      if (found) {
-        stop();
-        const t = found.includes('q=') ? (new URL(found, 'http://x').searchParams.get('q') || found) : found;
-        try {
-          await scan(t);
-          location.hash = '#/menu';
-          return;
-        } catch {
-          toast('QR invalide ou expiré', 'error');
-          return home();
+// ==========================================
+// MOTEUR DU SCANNER UNIVERSEL (JSQR + CANVAS)
+// ==========================================
+let scannerStream = null;
+let scannerAnim = null;
+
+async function startScanner() {
+  const box = $('#cam-box');
+  const video = $('#cam-video');
+  const canvas = $('#cam-canvas');
+  if (!box || !video || !canvas) return;
+
+  box.style.display = 'block';
+  try {
+    scannerStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } }
+    });
+    video.srcObject = scannerStream;
+    await video.play();
+
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    function tick() {
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        if (window.jsQR) {
+          const code = window.jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+          if (code && code.data) {
+            stopScanner();
+            handleScannedUrl(code.data);
+            return;
+          }
         }
       }
+      scannerAnim = requestAnimationFrame(tick);
     }
-    requestAnimationFrame(loop);
-  };
-  requestAnimationFrame(loop);
-}
-
-async function manual() {
-  const ests = await api('GET', '/establishments');
-  let h = '';
-  for (const e of ests) {
-    const zs = await api('GET', `/establishments/${e.id}/zones`);
-    h += `<div style="margin-top:12px"><b>${esc(e.name)}</b></div>` + zs.map(z => `
-      <div class="muted" style="margin:4px 0 2px">${esc(z.name)}</div>
-      <div class="row" style="flex-wrap:wrap;justify-content:flex-start;gap:6px">
-        ${z.points.map(p => `
-          <button class="sec sm" data-pt="${e.id}|${esc(e.name)}|${esc(z.name)}|${p.id}|${esc(p.code)}|${esc(p.label)}">
-            ${esc(p.code)}
-          </button>
-        `).join('')}
-      </div>
-    `).join('');
+    scannerAnim = requestAnimationFrame(tick);
+  } catch (err) {
+    box.style.display = 'none';
+    toast('Accès caméra refusé : utilisez la photo ou le choix direct', 'error');
   }
-  $('#lst').innerHTML = h;
-  $('#lst').onclick = async e => {
-    const d = e.target.dataset.pt;
-    if (!d) return;
-    const [id, name, zone, pid, code, label] = d.split('|');
-    S.ctx = { establishment: { id, name }, zone, point: { id: pid, code, label }, token: null };
-    LS.set('ctx', S.ctx);
-    S.cart = {};
-    await loadMenu();
-    location.hash = '#/menu';
+}
+
+function stopScanner() {
+  if (scannerAnim) cancelAnimationFrame(scannerAnim);
+  if (scannerStream) {
+    scannerStream.getTracks().forEach(t => t.stop());
+    scannerStream = null;
+  }
+  const box = $('#cam-box');
+  if (box) box.style.display = 'none';
+}
+
+async function handleQrFile(e) {
+  const file = e.target.files?.[0];
+  if (!file) return;
+  const img = new Image();
+  img.src = URL.createObjectURL(file);
+  img.onload = () => {
+    const c = document.createElement('canvas');
+    c.width = img.width;
+    c.height = img.height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    const id = ctx.getImageData(0, 0, c.width, c.height);
+    if (window.jsQR) {
+      const code = window.jsQR(id.data, id.width, id.height);
+      if (code && code.data) {
+        handleScannedUrl(code.data);
+        return;
+      }
+    }
+    toast('Aucun QR code trouvé sur cette photo', 'error');
   };
 }
 
-// MENU : Grille de cartes 3D avec photos, étiquettes fraîcheur & dock de panier
-function menu() {
-  if (!S.ctx) return home();
-  const by = c => S.products.filter(p => p.category_id === c.id);
-  const lines = cartLines(), n = lines.reduce((a, l) => a + l.q, 0);
+async function handleScannedUrl(data) {
+  let token = data;
+  try {
+    const u = new URL(data);
+    token = u.searchParams.get('q') || token;
+  } catch {}
+
+  try {
+    const info = await raw('GET', '/qr/' + encodeURIComponent(token));
+    S.ctx = {
+      establishment: info.establishment,
+      zone: info.zone,
+      point: info.point,
+      token
+    };
+    LS.set('table_ctx', S.ctx);
+    toast(`Installé à : ${info.point.label} (${info.establishment.name})`);
+    location.hash = '#/menu';
+    route();
+  } catch (err) {
+    toast('QR Code inconnu ou expiré', 'error');
+  }
+}
+
+// ==========================================
+// ÉCRAN 3 : MENU DES PRODUITS (DONNÉES RÉELLES DU VENDEUR)
+// ==========================================
+async function menu() {
+  if (!S.ctx) {
+    toast('Sélectionnez d\'abord une table', 'info');
+    location.hash = '#/';
+    return route();
+  }
+
+  // Chargement strict des vrais produits du vendeur
+  try {
+    const [prods, cats] = await Promise.all([
+      api('GET', `/products?establishment_id=${S.ctx.establishment.id}`),
+      api('GET', `/categories?establishment_id=${S.ctx.establishment.id}`)
+    ]);
+    S.products = prods || [];
+    S.cats = cats || [];
+  } catch {
+    S.products = [];
+    S.cats = [];
+  }
+
+  const lines = Object.entries(S.cart).map(([id, q]) => {
+    const p = S.products.find(x => x.id === id);
+    return p ? { ...p, q } : null;
+  }).filter(Boolean);
+
+  const cartCount = lines.reduce((acc, l) => acc + l.q, 0);
+  const cartTotal = lines.reduce((acc, l) => acc + (l.price * l.q), 0);
+
+  const filterProd = S.cat ? S.products.filter(p => p.category_id === S.cat) : S.products;
 
   shell(S.ctx.establishment.name, `
     <div class="card tb">
-      <div class="table-icon">🪑</div>
+      <div style="font-size:1.6rem">🪑</div>
       <div style="flex:1">
         <b class="hd" style="font-size:1.15rem">${esc(S.ctx.point.label)}</b>
-        <div class="muted">${esc(S.ctx.zone)} • Service rapide</div>
+        <div class="muted">${esc(S.ctx.zone || 'Sur place')}</div>
       </div>
-      <span class="pill">Frais &amp; Dispo</span>
+      <span class="pill">En direct</span>
     </div>
 
-    <div class="chips">
-      <button class="${S.cat ? '' : 'on'}" data-cat="">Tout le menu</button>
-      ${S.cats.map(c => `<button class="${S.cat === c.id ? 'on' : ''}" data-cat="${c.id}">${esc(c.name)}</button>`).join('')}
-    </div>
+    ${S.cats.length ? `
+      <div class="chips">
+        <button class="${S.cat ? '' : 'on'}" data-cat="">Tout</button>
+        ${S.cats.map(c => `<button class="${S.cat === c.id ? 'on' : ''}" data-cat="${c.id}">${esc(c.name)}</button>`).join('')}
+      </div>
+    ` : ''}
 
-    <button class="sec sm" id="mic" style="width:100%;margin:10px 0;display:flex;align-items:center;justify-content:center;gap:6px">
-      <span class="material-symbols-outlined text-[20px]" style="color:var(--p)">mic</span>
-      Commander directement à la voix
-    </button>
-
-    ${S.cats.filter(c => !S.cat || S.cat === c.id).map(c => by(c).length ? `
-      <h2>${esc(c.name)}</h2>
-      ${by(c).map(p => `
-        <div class="card pc">
-          <div class="ph">
-            ${p.image ? `<img src="${esc(p.image)}" alt="${esc(p.name)}" loading="lazy">` : `<span>${EMO[c.name] || '🍽️'}</span>`}
-            <div class="tag-overlay ${c.name === 'Boissons' ? 'green' : 'orange'}">
-              <span class="material-symbols-outlined text-[13px]">${c.name === 'Boissons' ? 'ac_unit' : 'local_fire_department'}</span>
-              <span>${c.name === 'Boissons' ? 'Très fraîche' : 'Chaud & Braisé'}</span>
+    ${filterProd.length ? `
+      <div class="col" style="gap:12px;margin-top:12px">
+        ${filterProd.map(p => `
+          <div class="card pc">
+            <div class="ph">
+              ${p.image ? `<img src="${esc(p.image)}" alt="${esc(p.name)}" loading="lazy">` : `<span>🍽️</span>`}
+              ${p.available ? '' : '<em class="so">Rupture</em>'}
             </div>
-            ${p.available ? '' : '<em class="so">Indisponible</em>'}
-          </div>
-          <div class="row">
-            <div>
-              <b class="hd" style="font-size:1.05rem">${esc(p.name)}</b>
-              <div class="muted">${esc(p.description)}</div>
-              <div class="price" style="margin-top:2px">${fcfa(p.price)}</div>
-            </div>
-            ${S.cart[p.id] ? `
-              <div class="qty">
-                <button data-m="${p.id}" aria-label="Moins">−</button>
-                <b style="min-width:20px;text-align:center">${S.cart[p.id]}</b>
-                <button data-a="${p.id}" aria-label="Plus">+</button>
+            <div class="row" style="align-items:center">
+              <div style="flex:1">
+                <b class="hd" style="font-size:1.05rem">${esc(p.name)}</b>
+                ${p.description ? `<div class="muted" style="font-size:0.85rem">${esc(p.description)}</div>` : ''}
+                <div class="price" style="margin-top:4px">${fcfa(p.price)}</div>
               </div>
-            ` : `
-              <button class="rd" data-a="${p.id}" ${p.available ? '' : 'disabled'} aria-label="Ajouter">+</button>
-            `}
+              <div>
+                ${S.cart[p.id] ? `
+                  <div class="qty">
+                    <button data-sub="${p.id}">−</button>
+                    <b>${S.cart[p.id]}</b>
+                    <button data-add="${p.id}">+</button>
+                  </div>
+                ` : `
+                  <button class="rd" data-add="${p.id}" ${p.available ? '' : 'disabled'}>+</button>
+                `}
+              </div>
+            </div>
           </div>
-    ` : '').join('')}
-
-    ${!S.products.length ? `
+        `).join('')}
+      </div>
+    ` : `
       <div class="card" style="text-align:center;padding:36px 16px;margin-top:14px">
         <span class="material-symbols-outlined text-[44px]" style="color:var(--tx-muted)">storefront</span>
         <b style="display:block;margin-top:10px;font-size:1.1rem">Aucun produit au menu pour le moment</b>
         <p class="muted" style="margin:4px 0 0">Le vendeur n'a pas encore ajouté d'articles pour cet établissement.</p>
       </div>
-    ` : ''}
+    `}
 
-    ${n ? `
-      <div class="bar">
-        <div class="bar-dock">
-          <div style="display:flex;align-items:center;gap:10px">
-            <div class="bar-cart-icon">
-              <span class="material-symbols-outlined">shopping_bag</span>
-              <span class="cart-count">${n}</span>
-            </div>
-            <div>
-              <div class="muted" style="font-size:0.75rem">${n > 1 ? n + ' articles choisis' : '1 article choisi'}</div>
-              <div class="price" style="font-size:1.2rem">${fcfa(total())}</div>
-            </div>
+    <!-- Dock Panier Flottant 3D -->
+    ${cartCount > 0 ? `
+      <div class="cart-dock" id="cart-dock">
+        <div class="dock-content">
+          <div class="dock-badge">🛒 ${cartCount}</div>
+          <div class="dock-info">
+            <span class="dock-label">Panier en cours</span>
+            <span class="dock-total">${fcfa(cartTotal)}</span>
           </div>
-          <button class="btn ok" id="cart" style="padding:10px 18px">
-            Commander à la table →
-          </button>
+          <button class="dock-btn" id="view-cart-btn">Commander ➔</button>
         </div>
       </div>
     ` : ''}
-  `, 'menu', ctxLine());
+  `, 'menu');
 
-  app.onclick = e => {
-    const a = e.target.dataset;
-    if (e.target.dataset.cat !== undefined) {
-      S.cat = e.target.dataset.cat || null;
+  app.querySelectorAll('[data-cat]').forEach(b => {
+    b.onclick = () => { S.cat = b.dataset.cat; menu(); };
+  });
+
+  app.querySelectorAll('[data-add]').forEach(b => {
+    b.onclick = () => {
+      const id = b.dataset.add;
+      S.cart[id] = (S.cart[id] || 0) + 1;
+      LS.set('cart', S.cart);
       menu();
-    }
-    if (a.a) { setQ(a.a, 1); menu(); }
-    if (a.m) { setQ(a.m, -1); menu(); }
-  };
-  $('#cart')?.addEventListener('click', cart);
-  $('#mic').onclick = voiceUI;
+    };
+  });
+
+  app.querySelectorAll('[data-sub]').forEach(b => {
+    b.onclick = () => {
+      const id = b.dataset.sub;
+      if (S.cart[id] > 1) S.cart[id]--;
+      else delete S.cart[id];
+      LS.set('cart', S.cart);
+      menu();
+    };
+  });
+
+  $('#view-cart-btn')?.addEventListener('click', showCartModal);
 }
 
-// PANIER & ENVOI
-function cart(err = '') {
-  const L = cartLines();
-  shell('Panier', `
-    ${L.map(l => `
-      <div class="card row">
-        <div>
-          <b class="hd">${esc(l.p.name)}</b>
-          <div class="muted">${l.q} × ${fcfa(l.p.price)}</div>
-        </div>
-        <b class="price">${fcfa(l.p.price * l.q)}</b>
+function showCartModal() {
+  const lines = Object.entries(S.cart).map(([id, q]) => {
+    const p = S.products.find(x => x.id === id);
+    return p ? { ...p, q } : null;
+  }).filter(Boolean);
+
+  const total = lines.reduce((acc, l) => acc + (l.price * l.q), 0);
+
+  const m = document.createElement('div');
+  m.className = 'modal-back';
+  m.innerHTML = `
+    <div class="modal-box col" style="max-width:440px">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <b class="hd" style="font-size:1.25rem">Votre Commande</b>
+        <button class="sm sec" id="close-m">✕</button>
       </div>
-    `).join('')}
-    <textarea id="note" placeholder="Précision cuisine / bar (ex: bien frais, piment à part, avec glaçons)"></textarea>
-    <div class="row" style="margin:14px 0">
-      <h2 style="margin:0">Total Commande</h2>
-      <span class="price" style="font-size:1.35rem">${fcfa(total())}</span>
+      <div class="muted" style="margin-bottom:12px">Table : ${esc(S.ctx.point.label)} (${esc(S.ctx.establishment.name)})</div>
+
+      <div class="col" style="gap:8px;max-height:240px;overflow-y:auto">
+        ${lines.map(l => `
+          <div class="row" style="justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--bd)">
+            <div>
+              <b>${esc(l.name)}</b>
+              <div class="muted" style="font-size:0.8rem">${l.q} × ${fcfa(l.price)}</div>
+            </div>
+            <b>${fcfa(l.price * l.q)}</b>
+          </div>
+        `).join('')}
+      </div>
+
+      <div class="row" style="justify-content:space-between;margin-top:14px;font-size:1.15rem;font-weight:900">
+        <span>Total :</span>
+        <span style="color:var(--p)">${fcfa(total)}</span>
+      </div>
+
+      <label class="muted" style="font-weight:700;margin-top:10px">Une précision pour la cuisine / le bar ? (optionnel)</label>
+      <input id="order-note" placeholder="Ex: Sans piment, boisson bien fraîche...">
+
+      <button class="big" id="send-order-btn" style="margin-top:14px">Envoyer ma commande</button>
     </div>
-    ${S.pending ? '<div class="card" style="border-color:var(--er)"><b>Envoi en cours ou en attente réseau.</b><div class="muted">La même clé d’idempotence est conservée pour éviter tout doublon.</div></div>' : ''}
-    ${err ? `<p style="color:var(--er);font-weight:700">${esc(err)}</p>` : ''}
-    <button class="big ok" id="send" ${L.length ? '' : 'disabled'}>
-      ${S.pending ? 'Réessayer l’envoi' : 'Envoyer la commande au bar'}
-    </button>
-  `, 'menu', ctxLine());
+  `;
+  document.body.appendChild(m);
 
-  $('#send').onclick = send;
-}
+  $('#close-m').onclick = () => m.remove();
+  $('#send-order-btn').onclick = async () => {
+    $('#send-order-btn').disabled = true;
+    try {
+      const items = lines.map(l => ({ product_id: l.id, quantity: l.q }));
+      const note = $('#order-note').value.trim();
+      const idempotencyKey = 'ord_' + Date.now() + '_' + Math.random().toString(36).slice(2, 9);
 
-async function send() {
-  const btn = $('#send');
-  btn.disabled = true;
-  S.pending ||= {
-    key: crypto.randomUUID(),
-    items: cartLines().map(l => ({ product_id: l.p.id, quantity: l.q })),
-    note: $('#note')?.value || '',
-    voice: S.voice?.id
-  };
-  LS.set('pending', S.pending);
+      const ord = await raw('POST', '/orders', {
+        establishment_id: S.ctx.establishment.id,
+        reception_point_id: S.ctx.point.id,
+        qr_token: S.ctx.token,
+        items,
+        note
+      }, S.tokens.access, { 'idempotency-key': idempotencyKey });
 
-  try {
-    if (!online()) throw new Error('offline');
-    const o = await api('POST', '/orders', {
-      qr_token: S.ctx.token,
-      reception_point_id: S.ctx.token ? undefined : S.ctx.point.id,
-      items: S.pending.items,
-      note: S.pending.note,
-      voice_message_id: S.pending.voice
-    }, { 'idempotency-key': S.pending.key });
+      S.cart = {};
+      LS.del('cart');
+      S.activeOrder = ord;
+      S.orderStatus = ord.status;
+      LS.set('order', ord);
+      LS.set('order_status', ord.status);
 
-    S.pending = null;
-    localStorage.removeItem('pending');
-    S.cart = {};
-    LS.set('cart', {});
-    S.voice = null;
-    LS.set('lastOrder', o.id);
-    done(o);
-  } catch (e) {
-    if (e.status >= 400 && e.status < 500 && e.status !== 401) {
-      S.pending = null;
-      localStorage.removeItem('pending');
-      return cart(({ OUT_OF_STOCK: 'Rupture : ' + e.message, QR_INVALID: 'Table invalide, rescannez le QR' })[e.code] || 'Commande refusée');
+      m.remove();
+      toast('Commande envoyée au vendeur !', 'ok');
+      location.hash = '#/order';
+      route();
+    } catch (err) {
+      $('#send-order-btn').disabled = false;
+      toast('Erreur lors de l\'envoi : ' + err.message, 'error');
     }
-    cart('Erreur de transmission : réessayez');
-  }
+  };
 }
 
-function done(o) {
-  shell('Confirmation', `
-    <div class="card" style="text-align:center;padding:24px 16px">
-      <div style="width:72px;height:72px;margin:0 auto 12px;border-radius:50%;background:linear-gradient(135deg,#059669,#006c49);color:#fff;display:grid;place-items:center;font-size:2.5rem;box-shadow:0 0 0 10px rgba(108,248,187,0.3)">
-        ✓
+// ==========================================
+// ÉCRAN 4 : SUIVI DE COMMANDE EN TEMPS RÉEL (REÇU PAR LE VENDEUR OU PAS)
+// ==========================================
+async function track() {
+  if (!S.activeOrder) {
+    shell('Ma Commande', `
+      <div class="card" style="text-align:center;padding:36px 16px">
+        <span class="material-symbols-outlined text-[44px]" style="color:var(--tx-muted)">receipt_long</span>
+        <b style="display:block;margin-top:10px;font-size:1.15rem">Aucune commande en cours</b>
+        <p class="muted" style="margin:4px 0 16px">Sélectionnez une table et choisissez vos consommations.</p>
+        <a class="btn big" href="#/menu">Voir le menu</a>
       </div>
-      <h2 class="hd" style="font-size:1.4rem">Commande bien reçue !</h2>
-      <p class="muted">
-        Le bar a accusé réception.<br>
-        <strong>Table ${esc(o.point?.code)} · ${esc(o.point?.zone)}</strong>
-      </p>
-      ${o.items.map(l => `
-        <div class="row" style="margin:4px 0">
-          <span>${l.quantity} × ${esc(l.name)}</span>
-          <span class="muted">${fcfa(l.total)}</span>
+    `, 'order');
+    return;
+  }
+
+  // Actualisation statut
+  try {
+    const updated = await api('GET', `/orders/${S.activeOrder.id}`);
+    if (updated) {
+      S.activeOrder = updated;
+      S.orderStatus = updated.status;
+      LS.set('order', updated);
+    }
+  } catch {}
+
+  const st = S.activeOrder.status;
+
+  // Calcul état d'avancement direct
+  const steps = [
+    { key: 'SUBMITTED', label: '1. Envoyée', desc: 'En attente de prise en charge par le vendeur' },
+    { key: 'RECEIVED', label: '2. Reçue par le vendeur', desc: 'Confirmée ! Votre commande arrive à votre table' },
+    { key: 'COMPLETED', label: '3. Servie & Terminée', desc: 'Commande servie avec succès' }
+  ];
+
+  const orderLevels = { SUBMITTED: 1, RECEIVED: 2, PREPARING: 2, READY: 2, DELIVERED: 2, COMPLETED: 3 };
+  const currentLevel = orderLevels[st] || 1;
+
+  shell('Suivi Commande', `
+    <div class="card" style="text-align:center;padding:20px 16px">
+      <div class="badge ${st === 'RECEIVED' || st === 'PREPARING' || st === 'READY' ? 'g' : 'orange'}" style="font-size:0.85rem;margin:0 auto 8px">
+        ${esc(statusLabel(st))}
+      </div>
+      <b style="font-size:1.3rem;display:block">Table ${esc(S.activeOrder.point?.label || '')}</b>
+      <div class="muted">${esc(S.activeOrder.establishment?.name || '')} • ${new Date(S.activeOrder.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</div>
+    </div>
+
+    <!-- Stepper 3D en direct -->
+    <div class="card" style="margin-top:12px">
+      <b style="display:block;margin-bottom:14px">État de votre commande :</b>
+      <div class="col" style="gap:14px">
+        ${steps.map((sp, idx) => {
+          const stepNum = idx + 1;
+          const isDone = currentLevel > stepNum;
+          const isCurrent = currentLevel === stepNum;
+          return `
+            <div class="row" style="align-items:flex-start;gap:12px">
+              <div style="width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-weight:800;font-size:0.85rem;${isCurrent ? 'background:var(--p);color:#fff;box-shadow:0 0 12px rgba(194,65,12,0.4);animation:pulse 2s infinite' : isDone ? 'background:#059669;color:#fff' : 'background:#e2e8f0;color:#64748b'}">
+                ${isDone ? '✓' : stepNum}
+              </div>
+              <div style="flex:1">
+                <b style="${isCurrent ? 'color:var(--p)' : ''}">${esc(sp.label)}</b>
+                <div class="muted" style="font-size:0.82rem">${esc(sp.desc)}</div>
+              </div>
+            </div>
+          `;
+        }).join('')}
+      </div>
+    </div>
+
+    <!-- Détail des articles -->
+    <div class="card" style="margin-top:12px">
+      <b style="display:block;margin-bottom:8px">Articles commandés :</b>
+      ${(S.activeOrder.items || []).map(i => `
+        <div class="row" style="justify-content:space-between;padding:4px 0;font-size:0.9rem">
+          <span>${i.quantity} × ${esc(i.name)}</span>
+          <b>${fcfa(i.total || (i.unit_price * i.quantity))}</b>
         </div>
       `).join('')}
-      <hr style="border:none;border-top:1px solid var(--bd);margin:12px 0">
-      <div class="row">
-        <b>Total</b>
-        <b class="price">${fcfa(o.total)}</b>
+      <div class="row" style="justify-content:space-between;margin-top:10px;padding-top:8px;border-top:1px solid var(--bd);font-weight:900">
+        <span>Total :</span>
+        <span style="color:var(--p)">${fcfa(S.activeOrder.total)}</span>
       </div>
     </div>
-    <a class="btn big ok" href="#/order" style="text-align:center">Suivre l'avancement en direct</a>
-    <p style="text-align:center;margin-top:12px"><a href="#/menu" class="muted">Commander un complément</a></p>
+
+    <div style="text-align:center;margin-top:16px">
+      <a class="btn sec sm" href="#/menu">Commander un supplément</a>
+    </div>
   `, 'order');
 }
 
-// SUIVI EN DIRECT (Ma Table) : Stepper animé & Temps Réel
-async function track() {
-  const id = LS.get('lastOrder', null);
-  if (!id) return shell('Ma Table', '<div class="card"><p class="muted">Aucune commande en cours à votre table.</p><a class="btn big" href="#/menu">Consulter la carte</a></div>', 'order');
-
-  const draw = async () => {
-    let o;
-    try { o = await api('GET', '/orders/' + id); LS.set('o:' + id, o); }
-    catch { o = LS.get('o:' + id, null); }
-    if (!o) return;
-
-    const currIdx = FLOW.indexOf(o.status);
-    const bad = ['CANCELLED', 'REJECTED', 'EXPIRED'].includes(o.status);
-
-    shell('Ma Table', `
-      <div class="card col">
-        <div class="row">
-          <div>
-            <span class="badge ${bad ? 'r' : 'g'}">${ST[o.status] || o.status}</span>
-            <h2 style="margin:4px 0 0">Table ${esc(o.point?.code)} · ${esc(o.point?.zone)}</h2>
-          </div>
-          <span class="font-price text-[1.4rem]">${fcfa(o.total)}</span>
-        </div>
-
-        <!-- Stepper Visuel 3D -->
-        <div class="stepper-container">
-          <div class="stepper-line">
-            <div class="stepper-progress" style="width:${bad ? 0 : Math.max(0, (currIdx / (FLOW.length - 1)) * 100)}%"></div>
-          </div>
-          ${FLOW.map((step, idx) => {
-            const isDone = idx < currIdx && !bad;
-            const isActive = idx === currIdx && !bad;
-            return `
-              <div class="step-node ${isDone ? 'done' : ''} ${isActive ? 'active' : ''}">
-                ${isDone ? '✓' : idx + 1}
-              </div>
-            `;
-          }).join('')}
-        </div>
-        <div class="row muted" style="font-size:0.75rem;justify-content:space-between">
-          <span>Envoyée</span>
-          <span>Reçue par le vendeur</span>
-          <span>Servie &amp; Terminée</span>
-        </div>
-
-        <div style="background:#f8fafc;padding:12px;border-radius:12px;border:1px solid var(--bd);margin-top:6px">
-          ${o.items.map(l => `
-            <div class="row" style="margin:4px 0">
-              <span><strong>${l.quantity}×</strong> ${esc(l.name)}</span>
-              <span>${fcfa(l.total)}</span>
-            </div>
-          `).join('')}
-        </div>
-
-        <div class="row" style="margin-top:4px">
-          <span class="badge ${o.payment_status === 'PAID' ? 'g' : ''}">
-            ${o.payment_status === 'PAID' ? '✓ Règlement confirmé' : 'À régler au comptoir ou au serveur'}
-          </span>
-        </div>
-
-        ${o.status === 'SUBMITTED' ? '<button class="dng sm" id="x" style="margin-top:8px">Annuler ma commande</button>' : ''}
+// ==========================================
+// ÉCRAN 5 : MON PROFIL SANS JARGON
+// ==========================================
+function profile() {
+  shell('Mon Profil', `
+    <div class="card" style="text-align:center;padding:24px 16px">
+      <div style="width:64px;height:64px;border-radius:50%;background:#fee2e2;color:var(--p);display:grid;place-items:center;margin:0 auto 10px;font-size:1.8rem;font-weight:900">
+        ${esc(S.me?.user?.display_name?.[0] || 'C')}
       </div>
-    `, 'order', 'Suivi synchronisé en temps réel');
-
-    $('#x')?.addEventListener('click', async () => {
-      await api('POST', `/orders/${id}/cancel`);
-      draw();
-    });
-  };
-
-  await draw();
-  S.poll = setInterval(() => location.hash === '#/order' ? draw() : clearInterval(S.poll), 4000);
-}
-
-// HISTORIQUE
-async function histView() {
-  let l;
-  try { l = await api('GET', '/orders'); LS.set('hist', l); }
-  catch { l = LS.get('hist', []); }
-
-  shell('Historique', l.map(o => `
-    <div class="card row">
-      <div>
-        <b class="hd">${new Date(o.created_at).toLocaleString('fr-FR')}</b>
-        <div class="muted">${o.items.map(i => i.quantity + '× ' + esc(i.name)).join(', ')}</div>
-      </div>
-      <div style="text-align:right">
-        <div class="price">${fcfa(o.total)}</div>
-        <span class="badge ${['CANCELLED','REJECTED'].includes(o.status) ? 'r' : 'g'}">${ST[o.status]}</span>
-      </div>
-    </div>
-  `).join('') || '<div class="card"><p class="muted">Aucune commande enregistrée.</p></div>', 'history');
-}
-
-// SÉCURITÉ & PROFIL : L'appareil est la clé d'accès + Biométrie & Code de Secours
-async function profile() {
-  const devs = await api('GET', '/me/devices').catch(() => []);
-  const info = await K.getProtectionInfo();
-
-  shell('Sécurité', `
-    <div class="card col">
-      <div class="row">
-        <div>
-          <b class="hd" style="font-size:1.15rem">${esc(S.me.display_name)}</b>
-          <div class="muted">Identifiant : ${esc(S.me.id.slice(0, 8))}...</div>
-        </div>
-        <span class="badge g">Clé Active</span>
-      </div>
-      <div style="background:#f8fafc;padding:10px 12px;border-radius:10px;font-size:0.8rem;border:1px solid var(--bd)">
-        <strong>Aucun mot de passe</strong> : cet appareil stocke votre clé privée non-exportable dans le matériel.
-      </div>
+      <b class="hd" style="font-size:1.3rem">${esc(S.me?.user?.display_name || 'Client')}</b>
+      <div class="badge g" style="margin:6px auto 0;font-size:0.75rem">Connexion sécurisée par cet appareil</div>
     </div>
 
-    <h2>Protection Biométrique & Code de Secours</h2>
-    <div class="card col">
-      <div class="row">
-        <div>
-          <b class="hd">Biométrie &amp; PIN de secours</b>
-          <div class="muted">
-            ${info.isProtected ? 'Protège l’accès avec Face ID / Empreinte + Code PIN' : 'Accès direct sans verrou'}
-          </div>
-        </div>
-        <button class="sm ${info.isProtected ? 'ok' : 'sec'}" id="bio-toggle">
-          ${info.isProtected ? 'ACTIVE' : 'DÉSACTIVÉE'}
-        </button>
-      </div>
-      ${info.isProtected ? `
-        <div class="row" style="margin-top:8px;padding-top:8px;border-top:1px solid var(--bd)">
-          <span class="muted" style="font-size:0.82rem">Code de secours configuré</span>
-          <button class="sec sm" id="regen-pin">Nouveau PIN</button>
-        </div>
-      ` : ''}
+    <div class="card col" style="gap:10px;margin-top:12px">
+      <b style="font-size:1rem">Sécurité &amp; Accès</b>
+      <p class="muted" style="margin:0;font-size:0.85rem">
+        Cet appareil vous connecte automatiquement à WANI sans mot de passe.
+      </p>
+
+      <button class="sec sm" id="setup-pin-btn" style="width:100%">
+        Configurer un code PIN de secours (6 chiffres)
+      </button>
+
+      <button class="sec sm" id="setup-bio-btn" style="width:100%">
+        Activer la reconnaissance (Empreinte / Visage)
+      </button>
+
+      <button class="sec sm" id="logout-btn" style="color:var(--er);margin-top:8px">
+        Déconnexion de cet appareil
+      </button>
     </div>
-
-    <h2>Appareils Autorisés</h2>
-    ${devs.map(d => `
-      <div class="card row">
-        <div>
-          <b class="hd">${esc(d.device_name)}</b>
-          ${d.current ? '<span class="badge g" style="margin-left:6px">Cet appareil</span>' : ''}
-          <div class="muted">
-            ${d.status === 'ACTIVE' ? '✓ Actif' : 'Révoqué'} · Dernier accès ${new Date(d.last_seen_at).toLocaleDateString('fr-FR')}
-          </div>
-        </div>
-        ${d.status === 'ACTIVE' && !d.current ? `<button class="dng sm" data-rev="${d.id}">Révoquer</button>` : ''}
-      </div>
-    `).join('')}
-
-    <button class="sec big" id="add">+ Lier un nouvel appareil</button>
-    <div id="code"></div>
   `, 'profile');
 
-  $('#bio-toggle').onclick = async () => {
-    if (info.isProtected) {
-      await K.disableProtection();
-      toast('Protection désactivée');
-    } else {
-      const pin = K.generateRandomBackupCode();
-      await K.enableProtection(S.me?.display_name, pin);
-      toast(`Protection activée (PIN: ${pin})`);
-    }
-    profile();
-  };
-
-  $('#regen-pin')?.addEventListener('click', async () => {
-    const pin = K.generateRandomBackupCode();
-    await K.setBackupCode(pin);
-    toast(`Nouveau PIN de secours : ${pin}`);
+  $('#setup-pin-btn')?.addEventListener('click', async () => {
+    const pin = prompt('Entrez votre code de secours à 6 chiffres :');
+    if (!pin || !/^\d{6}$/.test(pin)) return alert('Le code doit comporter exactement 6 chiffres.');
+    await KS.setPin(pin);
+    toast('Code de secours à 6 chiffres configuré avec succès !');
   });
 
-  $('#add').onclick = async () => {
-    const c = await api('POST', '/me/devices');
-    $('#code').innerHTML = `
-      <div class="card col" style="text-align:center">
-        <div class="muted">Saisissez ce code d'association sur le nouvel appareil (5 minutes) :</div>
-        <b style="font-size:1.8rem;letter-spacing:4px;color:var(--p)">${esc(c.code)}</b>
-      </div>
-    `;
-  };
-
-  app.onclick = async e => {
-    if (e.target.dataset.rev) {
-      await api('DELETE', '/me/devices/' + e.target.dataset.rev);
-      profile();
-    }
-  };
-}
-
-// POSTE BARMAN & CAISSE : Réception de commandes en direct (Pro 3D)
-async function staff() {
-  const est = S.me?.memberships?.[0]?.establishment_id;
-  if (!est) return;
-
-  const methods = await api('GET', '/payment-methods');
-  const NEXT = {
-    SUBMITTED: 'RECEIVED',
-    RECEIVED: 'PREPARING',
-    PREPARING: 'READY',
-    READY: 'DELIVERING',
-    DELIVERING: 'DELIVERED',
-    DELIVERED: 'COMPLETED'
-  };
-
-  const draw = async () => {
-    const os = (await api('GET', '/orders?establishment_id=' + est))
-      .filter(o => !['COMPLETED', 'CANCELLED', 'REJECTED', 'EXPIRED'].includes(o.status))
-      .sort((x, y) => (x.created_at || 0) - (y.created_at || 0));
-
-    const totalToCollect = os.filter(o => o.payment_status !== 'PAID').reduce((sum, o) => sum + o.total, 0);
-
-    shell('Barman', `
-      <!-- Top Duty Barman Panel -->
-      <div class="barman-duty-panel">
-        <div>
-          <div class="muted" style="font-size:0.75rem;text-transform:uppercase;letter-spacing:0.05em">Poste de commande</div>
-          <b class="hd" style="font-size:1.25rem">Caisse &amp; Barman</b>
-          <div style="display:flex;align-items:center;gap:6px;margin-top:2px;font-size:0.8rem">
-            <span class="pulse-dot"></span>
-            <span style="color:#059669;font-weight:700">Flux en direct (${os.length} active${os.length > 1 ? 's' : ''})</span>
-          </div>
-        </div>
-        <button class="sm ${S.serviceOpen ? 'ok' : 'sec'}" id="toggle-service">
-          ${S.serviceOpen ? 'Service Ouvert' : 'En Pause'}
-        </button>
-      </div>
-
-      <!-- Quick KPI Cards 3D -->
-      <div class="kpi-grid">
-        <div class="kpi-card">
-          <div style="width:38px;height:38px;border-radius:50%;background:#fff7ed;color:var(--p);display:grid;place-items:center">
-            <span class="material-symbols-outlined text-[20px]">pending_actions</span>
-          </div>
-          <div>
-            <div class="muted" style="font-size:0.75rem">Commandes actives</div>
-            <b class="hd" style="font-size:1.1rem">${os.length} tables</b>
-          </div>
-        </div>
-        <div class="kpi-card">
-          <div style="width:38px;height:38px;border-radius:50%;background:#ecfdf5;color:#059669;display:grid;place-items:center">
-            <span class="material-symbols-outlined text-[20px]">payments</span>
-          </div>
-          <div>
-            <div class="muted" style="font-size:0.75rem">À encaisser</div>
-            <b class="hd" style="font-size:1.1rem">${fcfa(totalToCollect)}</b>
-          </div>
-        </div>
-      </div>
-
-      <div class="row" style="margin:10px 0 6px">
-        <h2 style="margin:0;display:flex;align-items:center;gap:6px">
-          <span class="material-symbols-outlined text-[22px]" style="color:var(--p)">notifications_active</span>
-          Commandes des tables
-        </h2>
-        <span class="badge" style="font-weight:800">Priorité Bar</span>
-      </div>
-
-      <!-- Cartes de réception des commandes 3D -->
-      ${os.map(o => {
-        const mins = Math.max(0, Math.floor((Date.now() - o.created_at) / 60000));
-        return `
-          <div class="card col order-card-barman ${o.status.toLowerCase()}">
-            <div class="row">
-              <div>
-                <div class="row" style="gap:8px">
-                  <span class="hd" style="font-size:1.25rem;letter-spacing:-0.01em">TABLE ${esc(o.point?.code)}</span>
-                  <span class="badge">${esc(o.point?.zone || 'Bar')}</span>
-                </div>
-                <div class="order-time-badge">
-                  <span class="material-symbols-outlined text-[15px]">schedule</span>
-                  Commandé il y a ${mins} min
-                </div>
-              </div>
-              <div class="price" style="font-size:1.3rem">${fcfa(o.total)}</div>
-            </div>
-
-            <!-- Liste des articles commandés -->
-            <div style="background:#f8fafc;padding:10px 12px;border-radius:12px;border:1px solid var(--bd)">
-              ${o.items.map(i => `
-                <div class="row" style="margin:4px 0">
-                  <div style="display:flex;align-items:center;gap:8px">
-                    <span class="badge" style="background:#ffdbce;color:var(--p);font-size:0.75rem">${i.quantity}x</span>
-                    <strong style="font-size:0.9rem">${esc(i.name)}</strong>
-                  </div>
-                  <span class="muted" style="font-size:0.8rem">${esc(i.note || '')}</span>
-                </div>
-              `).join('')}
-            </div>
-
-            ${o.voice ? `
-              <div class="row" style="background:#fff7ed;padding:6px 10px;border-radius:10px">
-                <button class="sec sm" data-play="${o.voice.id}">
-                  <span class="material-symbols-outlined text-[16px]">play_arrow</span> Écouter note vocale
-                </button>
-                <span class="muted" style="font-size:0.8rem">« ${esc(o.voice.transcription)} »</span>
-              </div>
-            ` : ''}
-
-            <!-- Règlement -->
-            <div class="row">
-              <span class="muted" style="font-size:0.82rem">Paiement :</span>
-              <span class="badge ${o.payment_status === 'PAID' ? 'g' : 'r'}">
-                ${o.payment_status === 'PAID' ? '✓ Payé (' + (o.payment_method || 'Comptoir') + ')' : 'Non payé'}
-              </span>
-            </div>
-
-            <!-- Actions Barman Directes -->
-            <div class="row" style="gap:8px;margin-top:4px">
-              ${o.status === 'SUBMITTED' ? `
-                <button class="ok big" data-st="${o.id}:RECEIVED" style="flex:2">
-                  <span class="material-symbols-outlined text-[20px]">check_circle</span> Confirmer (Reçue) ✓
-                </button>
-              ` : `
-                <button class="ok big" data-st="${o.id}:COMPLETED" style="flex:2" ${o.payment_status === 'PAID' ? '' : 'disabled'}>
-                  ✓ Clôturer la table
-                </button>
-              `}
-              <button class="sec sm" data-pay="${o.id}" style="flex:1">Encaisser</button>
-            </div>
-              ${o.status === 'SUBMITTED' ? `
-                <button class="dng sm" data-st="${o.id}:REJECTED">Refuser</button>
-              ` : ''}
-            </div>
-
-            <!-- Encaissement Rapide 1-clic -->
-            ${o.payment_status !== 'PAID' ? `
-              <div class="row" style="flex-wrap:wrap;gap:6px;padding-top:6px;border-top:1px dashed var(--bd)">
-                <span class="muted" style="font-size:0.75rem;width:100%">Encaisser maintenant :</span>
-                ${methods.map(m => `
-                  <button class="sec sm" data-pay="${o.id}:${m}" style="flex:1;min-width:80px">
-                    ${m === 'CASH' ? 'Espèces' : m === 'ORANGE_MONEY' ? 'Orange' : m === 'MOOV_MONEY' ? 'Moov' : m}
-                  </button>
-                `).join('')}
-              </div>
-            ` : ''}
-          </div>
-        `;
-      }).join('') || `
-        <div class="card" style="text-align:center;padding:32px 16px;background:#ecfdf5;border-color:rgba(16,185,129,0.3)">
-          <div style="width:52px;height:52px;border-radius:50%;background:#059669;color:#fff;display:grid;place-items:center;margin:0 auto 10px">
-            <span class="material-symbols-outlined text-[28px]">thumb_up</span>
-          </div>
-          <b class="hd" style="font-size:1.2rem;color:#059669">Toutes les tables sont servies !</b>
-          <p class="muted" style="margin:4px 0 0">En attente de nouvelles commandes au comptoir.</p>
-        </div>
-      `}
-    `, 'staff', S.me.memberships[0]?.name || 'WANI');
-
-    $('#toggle-service')?.addEventListener('click', () => {
-      S.serviceOpen = !S.serviceOpen;
-      LS.set('serviceOpen', S.serviceOpen);
-      toast(S.serviceOpen ? 'Service ouvert' : 'Service en pause');
-      draw();
-    });
-  };
-
-  app.onclick = async e => {
-    const d = e.target.dataset;
+  $('#setup-bio-btn')?.addEventListener('click', async () => {
     try {
-      if (d.st) {
-        const [id, s] = d.st.split(':');
-        await api('POST', `/orders/${id}/status`, { status: s });
-      }
-      if (d.pay) {
-        const [id, m] = d.pay.split(':');
-        await api('POST', `/orders/${id}/payment`, { method: m });
-        toast('Paiement validé avec succès !');
-      }
-      if (d.play) {
-        const b = await fetch(`/voice/${d.play}/audio`, { headers: { authorization: 'Bearer ' + S.tok } }).then(r => r.blob());
-        new Audio(URL.createObjectURL(b)).play();
-        return;
-      }
-      draw();
-    } catch (er) {
-      toast('Action refusée : ' + (er.code || er.message), 'error');
-    }
-  };
-
-  await draw();
-  const t = setInterval(() => location.hash === '#/staff' ? draw() : clearInterval(t), 4000);
-}
-
-// GÉRANT : Tableau de bord, Stock, Équipe, Zones & Tables
-async function manager() {
-  const m = S.me?.memberships?.find(m => m.role === 'MANAGER') || S.me?.memberships?.[0];
-  if (!m) return;
-  const est = m.establishment_id;
-
-  const [st, inv, qr, prods, staffList, zones] = await Promise.all([
-    api('GET', '/statistics?establishment_id=' + est),
-    api('GET', '/inventory?establishment_id=' + est),
-    api('GET', `/establishments/${est}/qr`),
-    api('GET', '/products?establishment_id=' + est),
-    api('GET', `/establishments/${est}/staff`).catch(() => []),
-    api('GET', `/establishments/${est}/zones`).catch(() => [])
-  ]);
-
-  shell('Gérant', `
-    <div class="card col">
-      <div class="row">
-        <div>
-          <span class="muted">Recettes encaissées</span>
-          <div class="price" style="font-size:1.6rem">${fcfa(st.revenue_paid)}</div>
-        </div>
-        <span class="badge g">Direct</span>
-      </div>
-      <div class="muted" style="font-size:0.8rem">
-        Top : ${st.top_products.map(t => esc(t.name) + ' (' + t.qty + ')').join(', ') || 'Aucun'}
-      </div>
-    </div>
-
-    <h2>Disponibilité Cuisine &amp; Frigo</h2>
-    ${prods.map(p => `
-      <div class="card row">
-        <div>
-          <b class="hd">${esc(p.name)}</b>
-          <div class="muted">Stock : ${p.stock ?? 'Non suivi'} · ${fcfa(p.price)}</div>
-        </div>
-        <div class="row" style="gap:6px">
-          <button class="sm ${p.available ? 'ok' : 'sec'}" data-av="${p.id}:${p.available ? 0 : 1}">
-            ${p.available ? 'Au frais' : 'Rupture'}
-          </button>
-          <button class="sm" data-buy="${p.id}">+10</button>
-        </div>
-      </div>
-    `).join('')}
-
-    <h2>Ajouter un Produit ou une Zone</h2>
-    <div class="card col">
-      <div class="row">
-        <input id="cat-name" placeholder="Nom nouvelle catégorie">
-        <button class="sm sec" id="add-cat-btn" style="width:110px">Ajouter Cat</button>
-      </div>
-      <div class="row" style="margin-top:4px">
-        <input id="zone-name" placeholder="Nom nouvelle zone (ex: Cour Arrière)">
-        <button class="sm sec" id="add-zone-btn" style="width:110px">Ajouter Zone</button>
-      </div>
-      ${zones.length ? `
-        <div class="row" style="margin-top:4px">
-          <input id="point-code" placeholder="Code table (ex: J05, T02)" style="flex:1">
-          <select id="point-zone" style="flex:1">
-            ${zones.map(z => `<option value="${z.id}">${esc(z.name)}</option>`).join('')}
-          </select>
-          <button class="sm ok" id="add-point-btn">Créer Table</button>
-        </div>
-      ` : ''}
-    </div>
-
-    <h2>Équipe &amp; Codes d'accès</h2>
-    <div class="card col">
-      <div class="row">
-        <button class="sec sm" data-inv="STAFF" style="flex:1">Code Serveur</button>
-        <button class="sec sm" data-inv="MANAGER" style="flex:1">Code Gérant</button>
-      </div>
-      <div id="invc" style="margin-top:6px"></div>
-      ${staffList.length ? `
-        <div style="margin-top:8px;border-top:1px solid var(--bd);padding-top:8px">
-          <b class="muted" style="font-size:0.8rem">Membres actuels :</b>
-          ${staffList.map(u => `
-            <div class="row" style="margin:4px 0">
-              <span>${esc(u.display_name)} <span class="badge ${u.role === 'MANAGER' ? '' : 'g'}">${u.role}</span></span>
-              ${u.id !== S.me?.id ? `<button class="dng sm" data-del-staff="${u.id}">Retirer</button>` : ''}
-            </div>
-          `).join('')}
-        </div>
-      ` : ''}
-    </div>
-
-    <h2>Tables &amp; QR Codes</h2>
-    ${qr.map(q => `
-      <div class="card row">
-        <div>
-          <b class="hd">${esc(q.label)} (${esc(q.code)})</b>
-          <div class="muted">${esc(q.zone)}</div>
-        </div>
-        <div class="row" style="gap:6px">
-          <a class="badge" href="/?q=${q.token}" target="_blank">Lien QR</a>
-          <button class="sm sec" data-rotate-qr="${q.point_id}" title="Renouveler le QR">🔄</button>
-        </div>
-      </div>
-    `).join('')}
-  `, 'manager', m.name);
-
-  app.onclick = async e => {
-    const d = e.target.dataset;
-    try {
-      if (d.av) {
-        const [id, v] = d.av.split(':');
-        await api('PATCH', '/products/' + id, { available: v === '1' });
-        manager();
-      }
-      if (d.buy) {
-        await api('POST', '/inventory/movements', { product_id: d.buy, type: 'PURCHASE', quantity: 10 });
-        manager();
-      }
-      if (d.inv) {
-        const r = await api('POST', `/establishments/${est}/invites`, { role: d.inv });
-        $('#invc').innerHTML = `<div style="background:#fff7ed;padding:8px;border-radius:8px;border:1px solid #fed7aa;text-align:center"><b>${esc(r.code)}</b> <span class="muted">(24h, usage unique)</span></div>`;
-      }
-      if (d.rotateQr) {
-        await api('POST', `/reception-points/${d.rotateQr}/qr/rotate`);
-        toast('QR Code de la table renouvelé avec succès !');
-        manager();
-      }
-      if (d.delStaff) {
-        await api('DELETE', `/establishments/${est}/staff/${d.delStaff}`);
-        toast('Membre retiré de l’équipe');
-        manager();
-      }
-    } catch (er) {
-      toast(er.code || 'Erreur', 'error');
-    }
-  };
-
-  $('#add-cat-btn')?.addEventListener('click', async () => {
-    const name = $('#cat-name')?.value.trim();
-    if (!name) return;
-    await api('POST', '/categories', { establishment_id: est, name });
-    toast('Catégorie créée !');
-    manager();
-  });
-
-  $('#add-zone-btn')?.addEventListener('click', async () => {
-    const name = $('#zone-name')?.value.trim();
-    if (!name) return;
-    await api('POST', `/establishments/${est}/zones`, { name });
-    toast('Zone créée !');
-    manager();
-  });
-
-  $('#add-point-btn')?.addEventListener('click', async () => {
-    const code = $('#point-code')?.value.trim();
-    const zoneId = $('#point-zone')?.value;
-    if (!code || !zoneId) return;
-    await api('POST', `/zones/${zoneId}/points`, { code });
-    toast(`Table ${code} créée avec son QR !`);
-    manager();
-  });
-}
-
-// ADMIN : Validation des demandes de récupération d'appareils
-async function admin() {
-  if (!S.me?.is_admin) return home();
-
-  const reqs = await api('GET', '/admin/recovery').catch(() => []);
-
-  shell('Administration', `
-    <div class="card col">
-      <div class="row">
-        <div>
-          <b class="hd" style="font-size:1.25rem">Panneau Administrateur</b>
-          <div class="muted">Validation hors-bande des changements d'appareils</div>
-        </div>
-        <span class="badge" style="background:#ba1a1a;color:#fff">ADMIN</span>
-      </div>
-    </div>
-
-    <h2>Demandes de Récupération (${reqs.filter(r => r.status === 'PENDING').length} en attente)</h2>
-    ${reqs.map(r => `
-      <div class="card col" style="border-left:4px solid ${r.status === 'PENDING' ? '#d97706' : r.status === 'APPROVED' ? '#059669' : '#dc2626'}">
-        <div class="row">
-          <div>
-            <b class="hd">${esc(r.claimed_name || 'Client Inconnu')}</b>
-            <div class="muted">Plateforme : ${esc(r.platform || 'web')} · ${new Date(r.created_at).toLocaleString('fr-FR')}</div>
-          </div>
-          <span class="badge ${r.status === 'APPROVED' ? 'g' : r.status === 'REJECTED' ? 'r' : ''}">
-            ${r.status}
-          </span>
-        </div>
-        <div class="muted" style="font-size:0.75rem;word-break:break-all">
-          Clé : ${esc(r.public_key.slice(0, 32))}...
-        </div>
-        ${r.status === 'PENDING' ? `
-          <div class="row" style="gap:8px;margin-top:6px">
-            <button class="ok sm" data-approve="${r.id}" style="flex:1">✓ Approuver la clé</button>
-            <button class="dng sm" data-reject="${r.id}" style="flex:1">✕ Rejeter</button>
-          </div>
-        ` : ''}
-      </div>
-    `).join('') || '<div class="card"><p class="muted">Aucune demande de récupération enregistrée.</p></div>'}
-  `, 'admin', 'Supervision globale');
-
-  app.onclick = async e => {
-    const d = e.target.dataset;
-    if (d.approve) {
-      const targetUserId = prompt('Saisissez l’ID utilisateur cible à lier à ce nouvel appareil (vérification d’identité préalable obligatoire) :');
-      if (!targetUserId) return;
-      try {
-        await api('POST', `/admin/recovery/${d.approve}/approve`, { user_id: targetUserId.trim() });
-        toast('Nouvel appareil approuvé et lié avec succès !');
-        admin();
-      } catch (err) {
-        toast('Erreur approbation : ' + (err.code || err.message), 'error');
-      }
-    }
-    if (d.reject) {
-      try {
-        await api('POST', `/admin/recovery/${d.reject}/reject`);
-        toast('Demande rejetée');
-        admin();
-      } catch (err) {
-        toast('Erreur rejet', 'error');
-      }
-    }
-  };
-}
-
-// COMMANDE VOCALE AVEC INTERPRÉTATION FR & ENREGISTREMENT AUDIO
-async function voiceUI() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  app.insertAdjacentHTML('beforeend', `
-    <div class="modal-overlay" id="vbox">
-      <div class="modal-content">
-        <h2 class="hd">Parlez naturellement</h2>
-        <p class="muted">Ex : "Deux Flag bien fraîches et un poulet bicyclette"</p>
-        <button id="rec" class="mic">🎙️</button>
-        <div class="muted" id="rl">${SR ? 'Appuyez pour parler' : 'Saisissez votre commande ci-dessous'}</div>
-        <input id="vt" placeholder="Votre commande vocale" style="margin:12px 0">
-        <div class="row">
-          <button class="sec" id="vclose">Fermer</button>
-          <button class="ok" id="ana">Analyser</button>
-        </div>
-        <div id="vres" style="margin-top:10px;text-align:left"></div>
-      </div>
-    </div>
-  `);
-
-  $('#vclose').onclick = () => $('#vbox').remove();
-
-  let mr, chunks = [], t0 = 0, conf = 0;
-  $('#rec').onclick = async () => {
-    if (!SR) return;
-    const b = $('#rec');
-    if (mr?.state === 'recording') {
-      mr.stop();
-      b.classList.remove('live');
-      return;
-    }
-    try {
-      const st = await navigator.mediaDevices.getUserMedia({ audio: true });
-      chunks = [];
-      mr = new MediaRecorder(st);
-      mr.ondataavailable = e => chunks.push(e.data);
-      mr.onstop = () => st.getTracks().forEach(t => t.stop());
-      mr.start();
-      t0 = Date.now();
-
-      const sr = new SR();
-      sr.lang = 'fr-FR';
-      sr.onresult = e => {
-        $('#vt').value = e.results[0][0].transcript;
-        conf = e.results[0][0].confidence;
-        mr.state === 'recording' && mr.stop();
-        b.classList.remove('live');
-        $('#ana').click();
-      };
-      sr.start();
-      b.classList.add('live');
-      $('#rl').textContent = 'Écoute en cours...';
+      await KS.registerBiometric(S.me.user.display_name);
+      toast('Reconnaissance activée !');
     } catch {
-      toast('Accès micro refusé', 'error');
+      toast('Biométrie non disponible sur cet appareil', 'info');
     }
-  };
+  });
 
-  $('#ana').onclick = async () => {
-    try {
-      const r = await api('POST', '/voice/interpret', {
-        establishment_id: S.ctx.establishment.id,
-        text: $('#vt').value
-      });
-      $('#vres').innerHTML = r.items.length ? `
-        <div style="background:#f8fafc;padding:10px;border-radius:10px;border:1px solid var(--bd)">
-          <b>Articles détectés :</b>
-          ${r.items.map(i => `<div>${i.quantity} × ${esc(i.name)} <span class="muted">${esc(i.note)}</span></div>`).join('')}
-        </div>
-        <button class="big ok" id="okv" style="margin-top:8px">Ajouter au panier</button>
-      ` : '<p class="muted">Aucun article reconnu, veuillez reformuler.</p>';
-
-      $('#okv')?.addEventListener('click', async () => {
-        r.items.forEach(i => { S.cart[i.product_id] = (S.cart[i.product_id] || 0) + i.quantity; });
-        LS.set('cart', S.cart);
-        if (chunks.length) {
-          const blob = new Blob(chunks, { type: 'audio/webm' });
-          const b64 = btoa(String.fromCharCode(...new Uint8Array(await blob.arrayBuffer())));
-          try {
-            S.voice = await api('POST', '/voice/messages', {
-              establishment_id: S.ctx.establishment.id,
-              audio_base64: b64,
-              duration: (Date.now() - t0) / 1000,
-              transcription: $('#vt').value,
-              confidence: conf
-            });
-          } catch {}
-        }
-        $('#vbox').remove();
-        cart();
-      });
-    } catch {
-      toast('Interprétation indisponible', 'error');
+  $('#logout-btn')?.addEventListener('click', () => {
+    if (confirm('Voulez-vous vraiment vous déconnecter ?')) {
+      S.tokens = null;
+      S.me = null;
+      LS.del('auth');
+      LS.del('table_ctx');
+      welcome();
     }
-  };
+  });
 }
 
-// ROUTEUR
+// ==========================================
+// ROUTAGE PRINCIPAL
+// ==========================================
 async function route() {
-  clearInterval(S.poll);
-  app.onclick = app.onchange = null;
-  const h = location.hash.slice(2) || '';
-  ({ '': home, menu, order: track, history: histView, profile, staff, manager, admin }[h] || home)();
-}
-
-async function start() {
-  try {
-    S.me = await api('GET', '/me');
-  } catch (e) {
-    if (!online()) {
-      S.me = LS.get('me', { display_name: '', memberships: [] });
-    } else {
-      return welcome();
-    }
+  const h = location.hash.replace('#/', '').split('?')[0];
+  if (!S.tokens?.access) {
+    // Si une table est passée dans l'URL ?q=token
+    const q = new URLSearchParams(location.search).get('q');
+    if (q) LS.set('pending_qr', q);
+    return welcome();
   }
-  LS.set('me', S.me);
-  const pq = LS.get('qr', null);
+
+  if (!S.me) {
+    try { await loadMe(); } catch { return welcome(); }
+  }
+
+  // Traiter un éventuel QR en attente
+  const pq = LS.get('pending_qr', null);
   if (pq) {
-    LS.set('qr', null);
+    LS.del('pending_qr');
     try {
-      await scan(pq);
+      const info = await raw('GET', '/qr/' + encodeURIComponent(pq));
+      S.ctx = { establishment: info.establishment, zone: info.zone, point: info.point, token: pq };
+      LS.set('table_ctx', S.ctx);
       location.hash = '#/menu';
+      return menu();
     } catch {}
   }
-  await loadMenu();
-  route();
+
+  switch (h) {
+    case 'menu': return menu();
+    case 'order': return track();
+    case 'profile': return profile();
+    default: return home();
+  }
 }
 
 window.addEventListener('hashchange', route);
-window.addEventListener('online', route);
-window.addEventListener('offline', route);
-
-(async () => {
-  if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
+window.addEventListener('DOMContentLoaded', async () => {
+  // Détecter un token QR direct dans l'URL
   const q = new URLSearchParams(location.search).get('q');
-  if (!localStorage.getItem('device_id') || !(await K.hasKey())) {
-    if (q) LS.set('qr', q);
-    return welcome();
-  }
-  try {
-    await login();
-  } catch (e) {
-    if (online() && (e.code === 'DEVICE_REVOKED' || e.code === 'UNKNOWN_DEVICE')) {
-      await K.wipe();
-      localStorage.removeItem('device_id');
-      return welcome('Cet appareil n’est plus autorisé.');
-    }
-  }
-  const pq = q || LS.get('qr', null);
-  if (pq) {
-    LS.set('qr', null);
+  if (q) LS.set('pending_qr', q);
+
+  if (S.tokens?.access) {
     try {
-      await scan(pq);
-      history.replaceState(null, '', '/#/menu');
+      await loadMe();
+      connectSse();
+      route();
+      return;
     } catch {
-      toast('QR invalide ou expiré', 'error');
+      S.tokens = null;
+      LS.del('auth');
     }
   }
-  await start();
-  if (S.ctx && pq) location.hash = '#/menu';
-})();
+  welcome();
+});

@@ -623,12 +623,16 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
         if (webDir && req.method === 'GET') {
           const hostHeader = String(req.headers['host'] || '').toLowerCase();
           const isVendorSubdomain = hostHeader.startsWith('vendeur.') || hostHeader.startsWith('pro.');
+          const isVendorPath = url.pathname === '/vendeur' || url.pathname.startsWith('/vendeur/');
           const vendorDir = join(resolve(webDir), '..', 'web-vendeur');
-          const safeRoot = isVendorSubdomain && existsSync(vendorDir) ? resolve(vendorDir) : resolve(webDir);
+          const safeRoot = (isVendorSubdomain || isVendorPath) && existsSync(vendorDir) ? resolve(vendorDir) : resolve(webDir);
           let reqPath = '/';
           try {
             reqPath = decodeURIComponent(url.pathname);
           } catch {}
+          if (isVendorPath) {
+            reqPath = reqPath.replace(/^\/vendeur/, '') || '/';
+          }
           if (reqPath.includes('\0')) throw new E(400, 'BAD_REQUEST');
           const targetFile = resolve(join(safeRoot, reqPath === '/' ? 'index.html' : reqPath));
           if ((targetFile.startsWith(safeRoot + sep) || targetFile === safeRoot) && existsSync(targetFile) && statSync(targetFile).isFile()) {

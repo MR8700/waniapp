@@ -1,5 +1,6 @@
 /**
- * WANI Vendeur — Configuration API & Sous-domaines
+ * WANI Client — Configuration API & Sous-domaines
+ * Détection automatique de l'URL du Backend selon l'environnement
  */
 
 const host = window.location.hostname;
@@ -10,8 +11,6 @@ if (isDev && window.location.port !== '3000') {
   defaultApi = 'http://localhost:3000';
 } else if (host === 'waniapps.vercel.app' || host.endsWith('.localhost')) {
   defaultApi = '';
-} else if (host.startsWith('vendeur.')) {
-  defaultApi = window.location.protocol + '//' + host.replace(/^vendeur\./, '');
 }
 
 export const API_BASE = window.WANI_API || defaultApi;
