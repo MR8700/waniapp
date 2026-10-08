@@ -237,6 +237,14 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
     audit(c, 'ESTABLISHMENT_CREATED', 'establishment', id, { name });
     return { status: 201, body: { id, name, default_zone_id: zid } };
   });
+  on('POST', '/establishments/:id/claim', true, c => {
+    const e = estOk(c.params.id);
+    const hasManager = one("SELECT 1 x FROM establishment_members WHERE establishment_id=? AND role='MANAGER'", e.id);
+    if (hasManager) throw new E(403, 'ESTABLISHMENT_ALREADY_CLAIMED');
+    run('INSERT INTO establishment_members VALUES(?,?,?)', c.user.id, e.id, 'MANAGER');
+    audit(c, 'ESTABLISHMENT_CLAIMED', 'establishment', e.id);
+    return { status: 200, body: { ok: true, id: e.id, name: e.name, role: 'MANAGER' } };
+  });
   on('PATCH', '/establishments/:id', true, c => {
     need(c, c.params.id, 'MANAGER');
     const e = one('SELECT * FROM establishments WHERE id=?', c.params.id);
@@ -306,6 +314,23 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
     run('INSERT INTO qr_tokens VALUES(?,?,1,NULL,?)', token, id, now()); return { status: 201, body: { id, token } };
   });
   on('POST', '/establishments/:id/invites', true, c => { need(c, c.params.id, 'MANAGER'); const role = c.body.role === 'MANAGER' ? 'MANAGER' : 'STAFF'; const code = mkInvite({ kind: 'ROLE', est: c.params.id, role, ttl: 86400e3 }); audit(c, 'EMPLOYEE_INVITED', 'establishment', c.params.id, { role }); return { status: 201, body: { code, role } }; });
+  on('POST', '/invites/redeem', true, c => {
+    const code = String(c.body.code || '').trim().toUpperCase();
+    if (!code) throw new E(400, 'CODE_REQUIRED');
+    const inv = one('SELECT * FROM invites WHERE code_hash=? AND uses_left>0 AND expires_at>?', sha(code), now());
+    if (!inv) throw new E(400, 'INVALID_INVITE');
+    if (inv.kind === 'ROLE') {
+      const existing = one('SELECT * FROM establishment_members WHERE user_id=? AND establishment_id=?', c.user.id, inv.establishment_id);
+      if (!existing) {
+        run('INSERT INTO establishment_members VALUES(?,?,?)', c.user.id, inv.establishment_id, inv.role);
+      }
+      run('UPDATE invites SET uses_left=uses_left-1 WHERE code_hash=?', inv.code_hash);
+      audit(c, 'EMPLOYEE_JOINED', 'establishment', inv.establishment_id, { role: inv.role });
+      const est = one('SELECT name FROM establishments WHERE id=?', inv.establishment_id);
+      return { status: 200, body: { ok: true, establishment_id: inv.establishment_id, name: est?.name, role: inv.role } };
+    }
+    throw new E(400, 'INVALID_INVITE_TYPE');
+  });
   on('GET', '/establishments/:id/staff', true, c => { need(c, c.params.id, 'MANAGER'); return q('SELECT u.id,u.display_name,m.role FROM establishment_members m JOIN users u ON u.id=m.user_id WHERE m.establishment_id=?', c.params.id); });
   on('DELETE', '/establishments/:id/staff/:uid', true, c => { need(c, c.params.id, 'MANAGER'); run('DELETE FROM establishment_members WHERE user_id=? AND establishment_id=?', c.params.uid, c.params.id); audit(c, 'EMPLOYEE_REMOVED', 'user', c.params.uid); return { ok: true }; });
 

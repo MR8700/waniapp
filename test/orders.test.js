@@ -142,3 +142,31 @@ test('vendeur: création établissement, ajout de points de livraison et produit
   e.close();
 });
 
+test('vendeur: rachat établissement libre et utilisation code équipe', async () => {
+  const { e, tok } = await setup();
+  const dev2 = await newDevice(e, { name: 'Serveur Alpha' });
+  const tok2 = await dev2.token();
+
+  // Gérant génère une invitation pour son équipe
+  const invRes = await e.call('POST', `/establishments/${e.seed.est}/invites`, { role: 'STAFF' }, tok.m);
+  assert.equal(invRes.status, 201);
+  const code = invRes.body.code;
+  assert.ok(code);
+
+  // Serveur Alpha utilise le code pour rejoindre l'équipe
+  const redeemRes = await e.call('POST', '/invites/redeem', { code }, tok2);
+  assert.equal(redeemRes.status, 200);
+  assert.equal(redeemRes.body.role, 'STAFF');
+
+  // Serveur a maintenant accès
+  const me = await e.call('GET', '/me', null, tok2);
+  assert.equal(me.body.memberships.length, 1);
+  assert.equal(me.body.memberships[0].role, 'STAFF');
+
+  // Mauvais code d'équipe refusé
+  const badRedeem = await e.call('POST', '/invites/redeem', { code: 'FAUX-CODE' }, tok2);
+  assert.equal(badRedeem.status, 400);
+
+  e.close();
+});
+

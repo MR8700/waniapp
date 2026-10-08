@@ -294,6 +294,17 @@ function welcome(err = '') {
     </main>
   `;
 
+function friendlyError(err) {
+  const msg = String(err?.message || err || '');
+  if (msg.includes('DEVICE_EXISTS')) {
+    return "Cet appareil est déjà reconnu sur WANI.";
+  }
+  if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
+    return "Connexion au serveur impossible. Vérifiez votre connexion internet.";
+  }
+  return "Impossible d'accéder : " + msg;
+}
+
   $('#c-install-btn')?.addEventListener('click', triggerInstall);
   $('#start-btn').onclick = async () => {
     $('#start-btn').disabled = true;
@@ -311,13 +322,21 @@ function welcome(err = '') {
           console.warn('Reconnexion échouée:', err);
         }
       }
-      await register(name);
-      await login();
+      try {
+        await register(name);
+        await login();
+      } catch (regErr) {
+        if (String(regErr.message || '').includes('DEVICE_EXISTS')) {
+          await login();
+        } else {
+          throw regErr;
+        }
+      }
       location.hash = '#/';
       route();
     } catch (e) {
       $('#start-btn').disabled = false;
-      welcome('Impossible d\'accéder : ' + (e.message || e));
+      welcome(friendlyError(e));
     }
   };
 }
