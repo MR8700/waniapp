@@ -1,0 +1,11 @@
+{
+  "name": "wani-vendeur",
+  "version": "1.0.0",
+  "description": "WANI Vendeur — Tableau de bord PWA Gérant, Barman & Comptoir",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "npx --yes serve . -l 5001",
+    "build": "node -e \"console.log('Build vendeur prêt pour déploiement')\""
+  }
+}

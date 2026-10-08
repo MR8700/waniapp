@@ -1,0 +1,18 @@
+{
+  "name": "WANI Vendeur — Gestion & Commandes",
+  "short_name": "WANI Pro",
+  "description": "Tableau de bord gérant & barman pour la gestion des points de livraison, menus et commandes en temps réel",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#042f2e",
+  "theme_color": "#0f766e",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
