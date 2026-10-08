@@ -31,6 +31,41 @@ const S = {
 };
 
 // ==========================================
+// PWA INSTALLATION RAPIDE
+// ==========================================
+let deferredPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  deferredPrompt = e;
+  const b = document.getElementById('v-install-btn') || document.getElementById('hdr-install-btn');
+  if (b) b.style.display = 'inline-flex';
+});
+
+window.addEventListener('appinstalled', () => {
+  deferredPrompt = null;
+  toast('Application WANI Vendeur installée !', 'ok');
+});
+
+function isStandalone() {
+  return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+}
+
+async function triggerInstall() {
+  if (deferredPrompt) {
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === 'accepted') deferredPrompt = null;
+  } else {
+    const isIOS = /iPhone|iPad|iPod/.test(navigator.userAgent) && !window.MSStream;
+    if (isIOS) {
+      alert("Pour installer WANI Vendeur sur votre iPhone/iPad :\n\n1. Appuyez sur le bouton Partager ⎋ (en bas de Safari)\n2. Faites défiler et touchez 'Sur l'écran d'accueil' ⊕\n3. Appuyez sur 'Ajouter'");
+    } else {
+      alert("Pour installer l'application WANI Vendeur :\n\nOuvrez le menu de votre navigateur (les 3 points ⋮ en haut à droite) et touchez 'Installer l'application' ou 'Ajouter à l'écran d'accueil'.");
+    }
+  }
+}
+
+// ==========================================
 // CLIENT API & AUTHENTIFICATION
 // ==========================================
 async function raw(method, path, body = null, token = null) {
@@ -80,24 +115,34 @@ async function refresh() {
 }
 
 async function register(displayName, inviteCode = '') {
-  const pk = await KS.getPublicKeyBase64();
-  const did = await KS.getDeviceId();
-  const regSig = await KS.signAuth(`register|${did}|${pk}`);
-  return await raw('POST', '/auth/device/register', {
-    device_id: did,
+  let pk;
+  if (await KS.hasKey()) {
+    pk = await KS.publicKey();
+  } else {
+    pk = await KS.create();
+  }
+  const ts = Date.now();
+  const pop = await KS.sign(`register|${pk}|${ts}`);
+  const ua = navigator.userAgent;
+  const platform = /Android/.test(ua) ? 'android' : /iPhone|iPad/.test(ua) ? 'ios' : 'web';
+  const r = await raw('POST', '/auth/device/register', {
     public_key: pk,
-    device_name: 'Terminal Vendeur',
-    platform: 'web',
+    pop,
+    ts,
     display_name: displayName || 'Vendeur',
     invite_code: inviteCode || undefined,
-    registration_signature: regSig
+    device_name: platform === 'web' ? 'Terminal Vendeur' : platform,
+    platform
   });
+  localStorage.setItem('device_id', r.device_id);
+  return r;
 }
 
 async function login() {
-  const did = await KS.getDeviceId();
+  const did = localStorage.getItem('device_id');
+  if (!did) throw new Error('NO_DEVICE_ID');
   const ch = await raw('POST', '/auth/device/challenge', { device_id: did });
-  const sig = await KS.signAuth(`auth|${did}|${ch.nonce}`);
+  const sig = await KS.sign(`auth|${did}|${ch.nonce}`);
   const r = await raw('POST', '/auth/device/verify', {
     device_id: did,
     nonce: ch.nonce,
@@ -192,6 +237,12 @@ function shell(title, body, active = '') {
           </div>
         </div>
         <div class="row" style="gap:6px">
+          ${!isStandalone() ? `
+            <button class="sm sec" id="hdr-install-btn" title="Installer l'application" style="display:inline-flex;align-items:center;gap:4px;border-color:#14b8a6;color:#5eead4;background:rgba(20,184,166,0.15)">
+              <span class="material-symbols-outlined text-[18px]">install_mobile</span>
+              <span>Installer</span>
+            </button>
+          ` : ''}
           <button class="sm sec" id="toggle-service-btn" style="background:${S.serviceOpen ? '#059669' : '#dc2626'};color:#fff;border:none">
             ${S.serviceOpen ? '● Ouvert' : '■ En pause'}
           </button>
@@ -215,6 +266,7 @@ function shell(title, body, active = '') {
     </nav>
   `;
 
+  $('#hdr-install-btn')?.addEventListener('click', triggerInstall);
   $('#toggle-service-btn')?.addEventListener('click', () => {
     S.serviceOpen = !S.serviceOpen;
     toast(S.serviceOpen ? 'Service ouvert aux clients' : 'Service en pause');
@@ -227,45 +279,65 @@ function shell(title, body, active = '') {
 // ==========================================
 function welcome(err = '') {
   app.innerHTML = `
-    <main class="col" style="padding-top:40px;text-align:center">
+    <main class="col" style="padding-top:36px;text-align:center">
       <div style="width:76px;height:76px;margin:0 auto 12px;border-radius:50%;background:linear-gradient(135deg,#0d9488,#042f2e);display:grid;place-items:center;box-shadow:0 8px 24px rgba(13,148,136,0.3);border:3px solid #fff;color:#fff">
         <span class="material-symbols-outlined text-[40px]">store</span>
       </div>
       <h1 style="font-size:2rem;font-weight:900;justify-content:center;color:var(--tx)">WANI Vendeur</h1>
-      <div style="font-size:0.85rem;color:#0f766e;font-weight:800;margin:-6px auto 14px;text-transform:uppercase;letter-spacing:1px">Espace Gestion &amp; Barman</div>
+      <div style="font-size:0.95rem;color:#0f766e;font-weight:800;margin:-4px auto 14px;letter-spacing:0.5px">Commandez et soyez servi ! · Espace Vendeur</div>
       
-      <p class="muted" style="margin:0 auto 20px;max-width:360px">
-        Connexion rapide et sécurisée sans mot de passe. Gérez vos points de livraison, vos produits et recevez vos commandes en direct.
+      <p class="muted" style="margin:0 auto 16px;max-width:360px">
+        Connexion directe sans mot de passe. Gérez vos points de livraison, vos produits et recevez vos commandes en direct.
       </p>
+
+      <div style="margin:0 auto 16px;max-width:360px">
+        <button class="big sm sec" id="v-install-btn" style="border:2px solid #0f766e;color:#0f766e;font-weight:800;display:inline-flex;align-items:center;justify-content:center;gap:8px;width:100%;background:#f0fdfa">
+          <span class="material-symbols-outlined text-[20px]">install_mobile</span>
+          📲 Installer l'application Vendeur
+        </button>
+      </div>
 
       <div class="card col" style="text-align:left">
         <label class="muted" style="font-weight:700">Votre Nom ou Prénom</label>
         <input id="v-name" placeholder="Ex: Jean (Gérant), Aminata..." autocomplete="given-name">
 
-        <label class="muted" style="font-weight:700;margin-top:6px">Code d'équipe (facultatif si vous êtes déjà invité)</label>
+        <label class="muted" style="font-weight:700;margin-top:6px">Code d'équipe (facultatif si invité)</label>
         <input id="v-code" placeholder="Code d'association (ex: XXXXX-XXXXX)">
 
         <button class="big" id="v-start-btn" style="margin-top:10px;background:#0f766e">Accéder à mon espace vendeur</button>
         ${err ? `<p style="color:var(--er);margin:8px 0 0;font-size:0.85rem;font-weight:600">${esc(err)}</p>` : ''}
       </div>
 
-      <div style="margin-top:20px;font-size:0.85rem;color:var(--tx-muted)">
-        Nouveau vendeur ? Cliquez sur accéder pour enregistrer votre lieu de vente en 1 clic.
+      <div style="margin-top:20px;font-size:0.85rem;color:var(--tx-muted);font-weight:600">
+        ⚡ Commandez et soyez servi !
       </div>
     </main>
   `;
 
+  $('#v-install-btn')?.addEventListener('click', triggerInstall);
   $('#v-start-btn').onclick = async () => {
     $('#v-start-btn').disabled = true;
     try {
       const name = $('#v-name').value.trim() || 'Vendeur';
       const code = $('#v-code').value.trim();
+      const did = localStorage.getItem('device_id');
+      const hasKey = await KS.hasKey();
+      if (did && hasKey && !code) {
+        try {
+          await login();
+          location.hash = '#/orders';
+          route();
+          return;
+        } catch (err) {
+          console.warn('Reconnexion échouée:', err);
+        }
+      }
       await register(name, code);
       await login();
       location.hash = '#/orders';
       route();
     } catch (e) {
-      welcome('Impossible d\'accéder : ' + e.message);
+      welcome('Impossible d\'accéder : ' + (e.message || e));
     }
   };
 }
@@ -756,6 +828,13 @@ window.addEventListener('DOMContentLoaded', async () => {
       S.tokens = null;
       LS.del('auth');
     }
+  }
+  if (localStorage.getItem('device_id') && (await KS.hasKey())) {
+    try {
+      await login();
+      route();
+      return;
+    } catch {}
   }
   welcome();
 });
