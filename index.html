@@ -2,6 +2,15 @@
 <html lang="fr">
 <head>
   <meta charset="utf-8">
+  <script>
+    if (window.location.pathname === '/vendeur') {
+      window.location.replace('/vendeur/' + window.location.search + window.location.hash);
+    } else if (window.location.pathname.startsWith('/vendeur/')) {
+      const b = document.createElement('base');
+      b.href = '/vendeur/';
+      document.head.appendChild(b);
+    }
+  </script>
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
   <meta name="theme-color" content="#0f766e">
   <meta name="apple-mobile-web-app-capable" content="yes">
@@ -20,7 +29,9 @@
   <script type="module" src="app.js"></script>
   <script>
     if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js').catch(() => {}));
+      const swUrl = window.location.pathname.startsWith('/vendeur') ? '/vendeur/sw.js' : '/sw.js';
+      const swScope = window.location.pathname.startsWith('/vendeur') ? '/vendeur/' : '/';
+      window.addEventListener('load', () => navigator.serviceWorker.register(swUrl, { scope: swScope }).catch(() => {}));
     }
   </script>
 </body>
