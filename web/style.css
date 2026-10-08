@@ -793,20 +793,21 @@ nav a.on::after {
 /* ==========================================================================
    Modale & PIN Code de Secours 3D
    ========================================================================== */
-.modal-overlay {
+.modal-overlay, .modal-back {
   position: fixed;
   inset: 0;
   background: rgba(17, 28, 45, 0.65);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
-  display: grid;
-  place-items: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   z-index: 100;
   padding: 16px;
   animation: fade-in 0.25s ease-out;
 }
 
-.modal-content {
+.modal-content, .modal-box {
   background: linear-gradient(180deg, #ffffff 0%, #fffdfa 100%);
   border-radius: 1.5rem;
   border: 1px solid rgba(255, 255, 255, 0.95);
@@ -815,8 +816,7 @@ nav a.on::after {
               inset 0 1px 2px #ffffff;
   padding: 24px 20px;
   width: 100%;
-  max-width: 420px;
-  text-align: center;
+  max-width: 440px;
   animation: pop-up 0.3s cubic-bezier(0.16, 1, 0.3, 1);
 }
 

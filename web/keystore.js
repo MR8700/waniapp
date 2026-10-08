@@ -254,5 +254,13 @@ export const KeyStore = {
     return { ok: true, method: 'bypass' };
   },
 
+  async setPin(pin) {
+    return await this.setBackupCode(pin);
+  },
+
+  async registerBiometric(name) {
+    return await this.enableProtection(name);
+  },
+
   b64, unb64
 };

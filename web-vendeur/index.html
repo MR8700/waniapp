@@ -5,10 +5,6 @@
   <script>
     if (window.location.pathname === '/vendeur') {
       window.location.replace('/vendeur/' + window.location.search + window.location.hash);
-    } else if (window.location.pathname.startsWith('/vendeur/')) {
-      const b = document.createElement('base');
-      b.href = '/vendeur/';
-      document.head.appendChild(b);
     }
   </script>
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">

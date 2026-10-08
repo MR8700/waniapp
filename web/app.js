@@ -336,7 +336,7 @@ async function home() {
 
   shell('WANI', `
     <div class="card" style="text-align:center;padding:24px 16px">
-      <b style="font-size:1.2rem;display:block">Bonjour ${esc(S.me.user.display_name)} 👋</b>
+      <b style="font-size:1.2rem;display:block">Bonjour ${esc(S.me?.display_name || 'Client')} 👋</b>
       <p class="muted" style="margin:4px 0 16px">
         ${S.ctx ? `Vous êtes installé à : <strong>${esc(S.ctx.establishment?.name)} · ${esc(S.ctx.point?.label)}</strong>` : 'Scannez le QR code sur votre table pour voir la carte et commander.'}
       </p>
@@ -859,8 +859,8 @@ function profile() {
 
   $('#setup-bio-btn')?.addEventListener('click', async () => {
     try {
-      await KS.registerBiometric(S.me.user.display_name);
-      toast('Reconnaissance activée !');
+      await KS.enableProtection(S.me?.display_name || 'Client');
+      toast('Reconnaissance activée !', 'ok');
     } catch {
       toast('Biométrie non disponible sur cet appareil', 'info');
     }
