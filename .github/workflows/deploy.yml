@@ -1,0 +1,55 @@
+name: WANI APP - CI / CD & Vercel Deploy
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-and-verify:
+    name: Tests d'intégrité & Audit Sécurité
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupération du code source
+        uses: actions/checkout@v4
+
+      - name: Configuration de Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Exécution des tests automatisés (18 tests)
+        run: |
+          npm test
+
+  deploy-to-vercel:
+    name: Déploiement Production Vercel
+    needs: test-and-verify
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Récupération du code source
+        uses: actions/checkout@v4
+
+      - name: Configuration de Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Déploiement Vercel
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          if [ -n "$VERCEL_TOKEN" ]; then
+            echo "🚀 Déploiement Vercel automatique..."
+            npx --yes vercel pull --yes --environment=production --token=$VERCEL_TOKEN
+            npx --yes vercel build --prod --token=$VERCEL_TOKEN
+            npx --yes vercel deploy --prebuilt --prod --token=$VERCEL_TOKEN
+          else
+            echo "ℹ️ VERCEL_TOKEN non configuré dans les secrets GitHub. Le déploiement s'effectue via l'intégration GitHub native de Vercel ou via deploy.ps1."
+          fi

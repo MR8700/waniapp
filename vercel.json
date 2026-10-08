@@ -1,0 +1,46 @@
+{
+  "version": 2,
+  "outputDirectory": "web",
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api/index.js" },
+    { "source": "/auth/(.*)", "destination": "/api/index.js" },
+    { "source": "/me", "destination": "/api/index.js" },
+    { "source": "/me/(.*)", "destination": "/api/index.js" },
+    { "source": "/orders", "destination": "/api/index.js" },
+    { "source": "/orders/(.*)", "destination": "/api/index.js" },
+    { "source": "/products", "destination": "/api/index.js" },
+    { "source": "/products/(.*)", "destination": "/api/index.js" },
+    { "source": "/categories", "destination": "/api/index.js" },
+    { "source": "/categories/(.*)", "destination": "/api/index.js" },
+    { "source": "/establishments", "destination": "/api/index.js" },
+    { "source": "/establishments/(.*)", "destination": "/api/index.js" },
+    { "source": "/reception-points/(.*)", "destination": "/api/index.js" },
+    { "source": "/inventory", "destination": "/api/index.js" },
+    { "source": "/inventory/(.*)", "destination": "/api/index.js" },
+    { "source": "/qr/(.*)", "destination": "/api/index.js" },
+    { "source": "/voice/(.*)", "destination": "/api/index.js" },
+    { "source": "/statistics", "destination": "/api/index.js" },
+    { "source": "/notifications", "destination": "/api/index.js" },
+    { "source": "/events", "destination": "/api/index.js" },
+    { "source": "/realtime", "destination": "/api/index.js" },
+    { "source": "/admin", "destination": "/api/index.js" },
+    { "source": "/admin/(.*)", "destination": "/api/index.js" },
+    { "source": "/payment-methods", "destination": "/api/index.js" }
+  ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        { "key": "X-Content-Type-Options", "value": "nosniff" },
+        { "key": "X-Frame-Options", "value": "DENY" },
+        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }
+      ]
+    },
+    {
+      "source": "/(style.css|app.js|keystore.js)",
+      "headers": [
+        { "key": "Cache-Control", "value": "public, max-age=3600, stale-while-revalidate=86400" }
+      ]
+    }
+  ]
+}
