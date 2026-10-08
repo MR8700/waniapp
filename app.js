@@ -281,6 +281,23 @@ function shell(title, body, active = '') {
   });
 }
 
+function friendlyError(err) {
+  const msg = String(err?.message || err || '');
+  if (msg.includes('INVALID_INVITE')) {
+    return "Ce code d'équipe est introuvable ou a expiré. Si vous êtes le gérant ou souhaitez créer votre établissement, laissez la case de code vide !";
+  }
+  if (msg.includes('DEVICE_EXISTS')) {
+    return "Cet appareil est déjà reconnu sur WANI.";
+  }
+  if (msg.includes('ESTABLISHMENT_ALREADY_CLAIMED')) {
+    return "Cet établissement a déjà un gérant actif.";
+  }
+  if (msg.includes('Failed to fetch') || msg.includes('NetworkError')) {
+    return "Connexion au serveur impossible. Vérifiez votre connexion internet.";
+  }
+  return "Impossible d'accéder : " + msg;
+}
+
 // ==========================================
 // ÉCRAN 1 : CONNEXION SANS MOT DE PASSE (ZÉRO JARGON)
 // ==========================================
@@ -308,11 +325,24 @@ function welcome(err = '') {
         <label class="muted" style="font-weight:700">Votre Nom ou Prénom</label>
         <input id="v-name" placeholder="Ex: Jean (Gérant), Aminata..." autocomplete="given-name">
 
-        <label class="muted" style="font-weight:700;margin-top:6px">Code d'équipe (facultatif si invité)</label>
-        <input id="v-code" placeholder="Code d'association (ex: XXXXX-XXXXX)">
+        <!-- Bouton principal gérant (sans aucun code requis) -->
+        <button class="big" id="v-start-btn" style="margin-top:12px;background:#0f766e">Accéder à mon espace vendeur</button>
 
-        <button class="big" id="v-start-btn" style="margin-top:10px;background:#0f766e">Accéder à mon espace vendeur</button>
-        ${err ? `<p style="color:var(--er);margin:8px 0 0;font-size:0.85rem;font-weight:600">${esc(err)}</p>` : ''}
+        <!-- Option équipe (serveurs avec code d'invitation) -->
+        <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--bd)">
+          <details id="v-invite-details" style="font-size:0.85rem">
+            <summary style="cursor:pointer;color:#0f766e;font-weight:700">👉 Vous êtes serveur avec un code d'équipe ?</summary>
+            <div style="margin-top:8px">
+              <label class="muted" style="font-weight:600;font-size:0.8rem">Code d'invitation (fourni par votre gérant) :</label>
+              <input id="v-code" placeholder="Ex: XXXXX-XXXXX" style="margin-top:4px;font-size:0.9rem">
+              <div style="font-size:0.75rem;color:#64748b;margin-top:4px">
+                💡 <em>Laissez vide si vous êtes le gérant ou créez votre lieu.</em>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        ${err ? `<p style="color:var(--er);margin:10px 0 0;font-size:0.85rem;font-weight:600">${esc(err)}</p>` : ''}
       </div>
 
       <div style="margin-top:20px;font-size:0.85rem;color:var(--tx-muted);font-weight:600">
@@ -326,25 +356,52 @@ function welcome(err = '') {
     $('#v-start-btn').disabled = true;
     try {
       const name = $('#v-name').value.trim() || 'Vendeur';
-      const code = $('#v-code').value.trim();
+      const code = ($('#v-code')?.value || '').trim().toUpperCase();
       const did = localStorage.getItem('device_id');
       const hasKey = await KS.hasKey();
-      if (did && hasKey && !code) {
+
+      if (did && hasKey) {
+        // Appareil déjà enregistré
         try {
           await login();
+          if (code) {
+            try {
+              await api('POST', '/invites/redeem', { code });
+              await loadMe();
+            } catch (invErr) {
+              throw new Error(friendlyError(invErr));
+            }
+          }
           location.hash = '#/orders';
           route();
           return;
         } catch (err) {
           console.warn('Reconnexion échouée:', err);
+          if (code && String(err.message || '').includes("code d'équipe")) throw err;
         }
       }
-      await register(name, code);
-      await login();
+
+      // Nouvel appareil
+      try {
+        await register(name, code);
+        await login();
+      } catch (regErr) {
+        if (String(regErr.message || '').includes('DEVICE_EXISTS')) {
+          await login();
+          if (code) {
+            await api('POST', '/invites/redeem', { code });
+            await loadMe();
+          }
+        } else {
+          throw regErr;
+        }
+      }
+
       location.hash = '#/orders';
       route();
     } catch (e) {
-      welcome('Impossible d\'accéder : ' + (e.message || e));
+      $('#v-start-btn').disabled = false;
+      welcome(friendlyError(e));
     }
   };
 }
@@ -352,7 +409,12 @@ function welcome(err = '') {
 // ==========================================
 // CRÉATION DE L'ÉTABLISSEMENT SI NOUVEAU VENDEUR
 // ==========================================
-function createEstablishmentView() {
+async function createEstablishmentView() {
+  let publicEsts = [];
+  try {
+    publicEsts = (await raw('GET', '/establishments/public')) || [];
+  } catch {}
+
   getApp().innerHTML = `
     <header class="app-header" style="background:#042f2e;color:#fff;border-bottom-color:#115e59">
       <div class="row" style="width:100%;justify-content:space-between;align-items:center">
@@ -365,14 +427,32 @@ function createEstablishmentView() {
         </div>
       </div>
     </header>
-    <main class="col" style="padding:32px 16px;text-align:center">
+    <main class="col" style="padding:28px 16px;text-align:center">
       <div style="width:76px;height:76px;margin:0 auto 12px;border-radius:50%;background:linear-gradient(135deg,#0d9488,#042f2e);display:grid;place-items:center;color:#fff;box-shadow:0 8px 24px rgba(13,148,136,0.25)">
         <span class="material-symbols-outlined text-[40px]">storefront</span>
       </div>
-      <h2 style="font-size:1.6rem;font-weight:900;margin:0 0 6px;color:var(--tx)">Créer votre lieu de vente</h2>
-      <p class="muted" style="margin:0 auto 20px;max-width:360px">
-        Donnez un nom à votre buvette, maquis, bar ou restaurant pour commencer à configurer vos tables QR et recevoir des commandes en direct.
+      <h2 style="font-size:1.6rem;font-weight:900;margin:0 0 6px;color:var(--tx)">Votre lieu de vente</h2>
+      <p class="muted" style="margin:0 auto 20px;max-width:380px">
+        Prenez la gestion d'un lieu existant ou créez votre propre établissement (bar, restaurant, maquis, buvette).
       </p>
+
+      ${publicEsts.length ? `
+        <div class="card col" style="text-align:left;max-width:440px;margin:0 auto 16px;width:100%">
+          <b style="font-size:1rem;color:var(--tx)">Gérer un lieu existant :</b>
+          <div class="col" style="gap:8px;margin-top:8px">
+            ${publicEsts.map(e => `
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 12px;background:#f0fdfa;border:1px solid #ccfbf1;border-radius:8px">
+                <div>
+                  <strong>${esc(e.name)}</strong>
+                  <div style="font-size:0.75rem;color:var(--tx-muted)">${(e.points || []).length} tables actives</div>
+                </div>
+                <button class="sm" data-claim-id="${e.id}" style="background:#0f766e">Gérer</button>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+        <div style="margin:4px 0 16px;font-weight:700;color:var(--tx-muted);font-size:0.85rem">— OU CRÉER UN NOUVEAU LIEU —</div>
+      ` : ''}
 
       <div class="card col" style="text-align:left;max-width:440px;margin:0 auto;width:100%">
         <label class="muted" style="font-weight:700">Nom de votre établissement</label>
@@ -386,6 +466,21 @@ function createEstablishmentView() {
     </main>
   `;
 
+  getApp().querySelectorAll('[data-claim-id]').forEach(btn => {
+    btn.onclick = async () => {
+      const id = btn.getAttribute('data-claim-id');
+      try {
+        const r = await api('POST', `/establishments/${id}/claim`);
+        S.currentEst = { id: r.id, name: r.name, role: 'MANAGER' };
+        LS.set('current_est', S.currentEst);
+        toast('Établissement rattaché avec succès !', 'ok');
+        route();
+      } catch (err) {
+        alert(friendlyError(err));
+      }
+    };
+  });
+
   $('#save-est-btn').onclick = async () => {
     const name = $('#new-est-name').value.trim();
     if (!name) return alert('Veuillez entrer le nom de votre établissement.');
@@ -396,7 +491,7 @@ function createEstablishmentView() {
       toast('Établissement créé avec succès !', 'ok');
       route();
     } catch (err) {
-      alert('Erreur : ' + (err.message || err));
+      alert(friendlyError(err));
     }
   };
 
