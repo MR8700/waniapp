@@ -623,7 +623,16 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
         if (webDir && req.method === 'GET') {
           const hostHeader = String(req.headers['host'] || '').toLowerCase();
           const isVendorSubdomain = hostHeader.startsWith('vendeur.') || hostHeader.startsWith('pro.');
-          const isVendorPath = url.pathname === '/vendeur' || url.pathname.startsWith('/vendeur/');
+
+          if (url.pathname === '/vendeur') {
+            res.writeHead(302, {
+              'location': '/vendeur/' + (url.search || '') + (url.hash || ''),
+              'cache-control': 'no-cache, no-store, must-revalidate'
+            });
+            return res.end();
+          }
+
+          const isVendorPath = url.pathname.startsWith('/vendeur/');
           const vendorDir = join(resolve(webDir), '..', 'web-vendeur');
           const safeRoot = (isVendorSubdomain || isVendorPath) && existsSync(vendorDir) ? resolve(vendorDir) : resolve(webDir);
           let reqPath = '/';
@@ -636,6 +645,7 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
           if (reqPath.includes('\0')) throw new E(400, 'BAD_REQUEST');
           const targetFile = resolve(join(safeRoot, reqPath === '/' ? 'index.html' : reqPath));
           if ((targetFile.startsWith(safeRoot + sep) || targetFile === safeRoot) && existsSync(targetFile) && statSync(targetFile).isFile()) {
+            const isHtml = extname(targetFile) === '.html';
             res.writeHead(200, {
               'content-type': MIME[extname(targetFile)] || 'application/octet-stream',
               'access-control-allow-origin': '*',
@@ -643,7 +653,7 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
               'referrer-policy': 'no-referrer',
               'x-frame-options': 'DENY',
               'content-security-policy': "default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; media-src 'self' blob: data:; img-src 'self' data: https: blob:; connect-src 'self' *; frame-ancestors 'none'; object-src 'none'",
-              'cache-control': 'public, max-age=3600'
+              'cache-control': isHtml ? 'no-cache, no-store, must-revalidate' : 'public, max-age=120'
             });
             return createReadStream(targetFile).pipe(res);
           }

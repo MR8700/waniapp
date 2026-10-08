@@ -1,13 +1,13 @@
-const CACHE = 'wani-vendeur-v1';
+const CACHE = 'wani-vendeur-v2';
+const prefix = self.registration.scope.includes('/vendeur') ? '/vendeur' : '';
 const ASSETS = [
-  '/',
-  '/index.html',
-  '/style.css',
-  '/app.js',
-  '/keystore.js',
-  '/config.js',
-  '/manifest.json',
-  '/icon.svg'
+  prefix + '/',
+  prefix + '/style.css',
+  prefix + '/app.js',
+  prefix + '/keystore.js',
+  prefix + '/config.js',
+  prefix + '/manifest.json',
+  prefix + '/icon.svg'
 ];
 
 self.addEventListener('install', e => {
@@ -22,10 +22,16 @@ self.addEventListener('activate', e => {
 
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
-  if (url.pathname.startsWith('/api') || url.pathname.startsWith('/auth') || url.pathname === '/events' || url.pathname === '/realtime' || url.pathname.startsWith('/orders')) {
+  if (url.pathname.startsWith('/api') || url.pathname.startsWith('/auth') || url.pathname === '/events' || url.pathname === '/realtime' || url.pathname.startsWith('/orders') || url.pathname.startsWith('/establishments') || url.pathname.startsWith('/products')) {
     return;
   }
   e.respondWith(
-    caches.match(e.request).then(cached => cached || fetch(e.request).catch(() => cached))
+    fetch(e.request).then(res => {
+      if (res && res.status === 200 && e.request.method === 'GET') {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+      }
+      return res;
+    }).catch(() => caches.match(e.request))
   );
 });
