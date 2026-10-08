@@ -1,4 +1,4 @@
-const CACHE = 'wani-vendeur-v2';
+const CACHE = 'wani-vendeur-v3';
 const prefix = self.registration.scope.includes('/vendeur') ? '/vendeur' : '';
 const ASSETS = [
   prefix + '/',

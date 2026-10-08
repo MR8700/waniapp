@@ -264,3 +264,29 @@ export const KeyStore = {
 
   b64, unb64
 };
+
+export const hasKey = () => KeyStore.hasKey();
+export const create = () => KeyStore.create();
+export const publicKey = () => KeyStore.publicKey();
+export const getPublicKeyBase64 = () => KeyStore.getPublicKeyBase64();
+export const getDeviceId = () => KeyStore.getDeviceId();
+export const sign = (msg) => KeyStore.sign(msg);
+export const signAuth = (msg) => KeyStore.signAuth(msg);
+export const wipe = () => KeyStore.wipe();
+export const biometricAvailable = () => KeyStore.biometricAvailable();
+export const isProtected = () => KeyStore.isProtected();
+export const getProtectionInfo = () => KeyStore.getProtectionInfo();
+export const generateRandomBackupCode = () => KeyStore.generateRandomBackupCode();
+export const setBackupCode = (code) => KeyStore.setBackupCode(code);
+export const verifyBackupCode = (code) => KeyStore.verifyBackupCode(code);
+export const enableProtection = (displayName, customCode) => KeyStore.enableProtection(displayName, customCode);
+export const disableProtection = () => KeyStore.disableProtection();
+export const unlock = (onPromptBackupCode) => KeyStore.unlock(onPromptBackupCode);
+export const setPin = (pin) => KeyStore.setPin(pin);
+export const registerBiometric = (name) => KeyStore.registerBiometric(name);
+
+if (typeof window !== 'undefined') {
+  window.KeyStore = KeyStore;
+}
+
+export default KeyStore;
