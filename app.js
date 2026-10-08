@@ -351,21 +351,39 @@ function welcome(err = '') {
 // ==========================================
 // CRÉATION DE L'ÉTABLISSEMENT SI NOUVEAU VENDEUR
 // ==========================================
-function createEstablishmentModal() {
-  const m = document.createElement('div');
-  m.className = 'modal-back';
-  m.innerHTML = `
-    <div class="modal-box col" style="max-width:440px">
-      <b class="hd" style="font-size:1.25rem">Créer votre lieu de vente</b>
-      <p class="muted" style="margin:4px 0 14px">Donnez un nom à votre buvette, maquis, bar ou restaurant pour commencer à recevoir des commandes.</p>
+function createEstablishmentView() {
+  getApp().innerHTML = `
+    <header class="app-header" style="background:#042f2e;color:#fff;border-bottom-color:#115e59">
+      <div class="row" style="width:100%;justify-content:space-between;align-items:center">
+        <div class="row" style="gap:8px;align-items:center">
+          <div style="width:32px;height:32px;border-radius:8px;background:#0d9488;color:#fff;display:grid;place-items:center;font-weight:900;font-family:var(--hd)">W</div>
+          <div>
+            <b class="hd" style="font-size:1.1rem;color:#fff">WANI Vendeur</b>
+            <div style="font-size:0.75rem;color:#5eead4">Configuration de votre lieu</div>
+          </div>
+        </div>
+      </div>
+    </header>
+    <main class="col" style="padding:32px 16px;text-align:center">
+      <div style="width:76px;height:76px;margin:0 auto 12px;border-radius:50%;background:linear-gradient(135deg,#0d9488,#042f2e);display:grid;place-items:center;color:#fff;box-shadow:0 8px 24px rgba(13,148,136,0.25)">
+        <span class="material-symbols-outlined text-[40px]">storefront</span>
+      </div>
+      <h2 style="font-size:1.6rem;font-weight:900;margin:0 0 6px;color:var(--tx)">Créer votre lieu de vente</h2>
+      <p class="muted" style="margin:0 auto 20px;max-width:360px">
+        Donnez un nom à votre buvette, maquis, bar ou restaurant pour commencer à configurer vos tables QR et recevoir des commandes en direct.
+      </p>
 
-      <label class="muted" style="font-weight:700">Nom de l'établissement</label>
-      <input id="new-est-name" placeholder="Ex: Maquis La Paillote, Bar VIP...">
+      <div class="card col" style="text-align:left;max-width:440px;margin:0 auto;width:100%">
+        <label class="muted" style="font-weight:700">Nom de votre établissement</label>
+        <input id="new-est-name" placeholder="Ex: Maquis Le Sahel, Bar VIP, Chez Aminata..." style="font-size:1rem;margin-top:6px">
+        <button class="big" id="save-est-btn" style="margin-top:14px;background:#0f766e">Enregistrer &amp; Ouvrir l'espace vendeur</button>
+      </div>
 
-      <button class="big" id="save-est-btn" style="margin-top:14px;background:#0f766e">Créer mon établissement</button>
-    </div>
+      <div style="margin-top:24px">
+        <button class="sec sm" id="v-switch-user-btn" style="color:var(--er)">Se déconnecter ou changer de compte</button>
+      </div>
+    </main>
   `;
-  document.body.appendChild(m);
 
   $('#save-est-btn').onclick = async () => {
     const name = $('#new-est-name').value.trim();
@@ -374,25 +392,35 @@ function createEstablishmentModal() {
       const r = await api('POST', '/establishments', { name });
       S.currentEst = { id: r.id, name: r.name, role: 'MANAGER' };
       LS.set('current_est', S.currentEst);
-      m.remove();
-      toast('Établissement créé avec succès !');
+      toast('Établissement créé avec succès !', 'ok');
       route();
     } catch (err) {
-      alert('Erreur : ' + err.message);
+      alert('Erreur : ' + (err.message || err));
     }
   };
+
+  $('#v-switch-user-btn')?.addEventListener('click', () => {
+    S.tokens = null;
+    S.me = null;
+    S.currentEst = null;
+    LS.del('auth');
+    LS.del('current_est');
+    welcome();
+  });
 }
 
 // ==========================================
 // ÉCRAN 2 : RÉCEPTION DES COMMANDES EN TEMPS RÉEL
 // ==========================================
 async function loadOrders() {
-  if (!S.currentEst) return;
+  if (!S.currentEst) return createEstablishmentView();
   try {
     const list = await api('GET', `/orders?establishment_id=${S.currentEst.id}`);
     S.orders = list || [];
     renderOrders();
-  } catch {}
+  } catch {
+    renderOrders();
+  }
 }
 
 function renderOrders() {
@@ -810,7 +838,7 @@ async function route() {
   }
 
   if (!S.currentEst && (!S.me?.memberships || !S.me.memberships.length)) {
-    return createEstablishmentModal();
+    return createEstablishmentView();
   }
 
   connectSse();
