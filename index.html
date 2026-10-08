@@ -27,7 +27,9 @@
     if ('serviceWorker' in navigator) {
       const swUrl = window.location.pathname.startsWith('/vendeur') ? '/vendeur/sw.js' : '/sw.js';
       const swScope = window.location.pathname.startsWith('/vendeur') ? '/vendeur/' : '/';
-      window.addEventListener('load', () => navigator.serviceWorker.register(swUrl, { scope: swScope }).catch(() => {}));
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register(swUrl, { scope: swScope }).then(reg => reg.update()).catch(() => {});
+      });
     }
   </script>
 </body>
