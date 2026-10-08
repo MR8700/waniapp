@@ -9,7 +9,13 @@ import * as KS from './keystore.js';
 const $ = sel => document.querySelector(sel);
 const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 const fcfa = n => (Number(n) || 0).toLocaleString('fr-FR') + ' FCFA';
-const app = $('#app');
+const getApp = () => document.getElementById('app') || document.querySelector('#app') || document.body;
+const app = {
+  get innerHTML() { return getApp().innerHTML; },
+  set innerHTML(v) { getApp().innerHTML = v; },
+  querySelectorAll(...a) { return getApp().querySelectorAll(...a); },
+  querySelector(...a) { return getApp().querySelector(...a); }
+};
 
 const LS = {
   get: (k, d = null) => { try { const v = localStorage.getItem('wc_' + k); return v ? JSON.parse(v) : d; } catch { return d; } },
@@ -908,8 +914,7 @@ async function route() {
   }
 }
 
-window.addEventListener('hashchange', route);
-window.addEventListener('DOMContentLoaded', async () => {
+async function init() {
   // Détecter un token QR direct dans l'URL
   const q = new URLSearchParams(location.search).get('q');
   if (q) LS.set('pending_qr', q);
@@ -934,4 +939,12 @@ window.addEventListener('DOMContentLoaded', async () => {
     } catch {}
   }
   welcome();
-});
+}
+
+window.addEventListener('hashchange', route);
+
+if (document.readyState === 'loading') {
+  window.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}

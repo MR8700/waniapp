@@ -23,11 +23,18 @@ self.addEventListener('activate', e => {
 
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
-  // Ne pas cacher les appels API ou SSE
-  if (url.pathname.startsWith('/api') || url.pathname.startsWith('/auth') || url.pathname === '/events' || url.pathname === '/realtime' || url.pathname.startsWith('/orders')) {
+  // Ne jamais intercepter l'espace vendeur ni les endpoints API dynamiques
+  if (url.pathname.startsWith('/vendeur') || url.pathname.startsWith('/api') || url.pathname.startsWith('/auth') || url.pathname === '/events' || url.pathname === '/realtime' || url.pathname.startsWith('/orders') || url.pathname.startsWith('/establishments') || url.pathname.startsWith('/products')) {
     return;
   }
+  // Stratégie réseau d'abord avec repli cache
   e.respondWith(
-    caches.match(e.request).then(cached => cached || fetch(e.request).catch(() => cached))
+    fetch(e.request).then(res => {
+      if (res && res.status === 200 && e.request.method === 'GET') {
+        const copy = res.clone();
+        caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+      }
+      return res;
+    }).catch(() => caches.match(e.request))
   );
 });
