@@ -4,7 +4,8 @@
  */
 
 import { API_BASE } from './config.js';
-import * as KS from './keystore.js';
+import * as KS_RAW from './keystore.js';
+const KS = KS_RAW.KeyStore || KS_RAW;
 
 const $ = sel => document.querySelector(sel);
 const esc = s => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');

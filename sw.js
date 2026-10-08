@@ -1,4 +1,4 @@
-const CACHE = 'wani-client-v1';
+const CACHE = 'wani-client-v3';
 const ASSETS = [
   '/',
   '/index.html',
