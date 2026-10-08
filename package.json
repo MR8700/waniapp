@@ -1,0 +1,11 @@
+{
+  "name": "wani-client",
+  "version": "1.0.0",
+  "description": "WANI Client — Application PWA Mobile-First de Commande & Service",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "npx --yes serve . -l 5000",
+    "build": "node -e \"console.log('Build client prêt pour déploiement')\""
+  }
+}
