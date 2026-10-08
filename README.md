@@ -19,7 +19,12 @@ Cliquez sur le bouton ci-dessous pour déployer automatiquement WANI APP sur vot
 
 [![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/MR8700/waniapp&env=APP_SECRET,DATA_DIR&project-name=waniapp&repository-name=waniapp)
 
-Les variables d'environnement (`APP_SECRET`, `DATA_DIR`) sont pré-configurées.
+Lors du déploiement, renseignez les 2 variables d'environnement demandées par Vercel :
+
+| Nom (Name) | Valeur recommandée (Value) | Description |
+| :--- | :--- | :--- |
+| **`APP_SECRET`** | `43a068002db39151e682de5c1c7226af14ae0c76d1a51bac97c1f72db6ad16f7` | Clé cryptographique pour la signature des sessions |
+| **`DATA_DIR`** | `/tmp/wani-data` | Dossier d'écriture temporaire pour SQLite sur Vercel |
 
 ---
 
