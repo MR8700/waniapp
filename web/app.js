@@ -391,6 +391,22 @@ async function home() {
       <button class="sec sm" id="close-cam-btn">Fermer la caméra</button>
     </div>
 
+    <!-- Saisie directe du code court de table / point de livraison -->
+    <div class="card" style="margin-top:14px;text-align:left">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <span class="material-symbols-outlined" style="color:var(--p)">pin</span>
+        <b style="font-size:1rem;color:var(--tx)">Saisir le code de votre table</b>
+      </div>
+      <p class="muted" style="margin:0 0 10px;font-size:0.85rem">
+        Entrez le code court affiché sur votre table ou reçu du serveur pour afficher directement la carte.
+      </p>
+      <div class="row" style="gap:8px">
+        <input id="quick-pt-code" placeholder="Ex: J04, T01, VIP1..." style="font-family:monospace;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;font-size:1.05rem" autocomplete="off">
+        <button class="big" id="quick-pt-btn" style="white-space:nowrap;padding:0 18px;background:var(--p)">Accéder</button>
+      </div>
+      <div id="quick-pt-err" style="color:var(--er);font-size:0.85rem;margin-top:8px;font-weight:600;display:none"></div>
+    </div>
+
     <!-- Choix direct sans scanner -->
     <div class="card" style="margin-top:14px">
       <b style="display:block;margin-bottom:8px">Ou choisissez votre lieu &amp; table directement :</b>
@@ -412,6 +428,52 @@ async function home() {
       ` : '<p class="muted" style="font-size:0.85rem">Aucun lieu de vente ouvert pour le moment.</p>'}
     </div>
   `, 'home');
+
+  const handleQuickCode = async () => {
+    const code = ($('#quick-pt-code')?.value || '').trim();
+    const errBox = $('#quick-pt-err');
+    if (!code) {
+      if (errBox) { errBox.textContent = 'Veuillez saisir le code de votre table.'; errBox.style.display = 'block'; }
+      return;
+    }
+    if (errBox) errBox.style.display = 'none';
+    const btn = $('#quick-pt-btn');
+    if (btn) btn.disabled = true;
+
+    try {
+      const info = await raw('GET', '/qr/' + encodeURIComponent(code));
+      if (info.multiple && info.options?.length) {
+        S.ctx = {
+          establishment: info.options[0].establishment,
+          zone: info.options[0].zone,
+          point: info.options[0].point,
+          token: info.options[0].token
+        };
+      } else {
+        S.ctx = {
+          establishment: info.establishment,
+          zone: info.zone,
+          point: info.point,
+          token: info.token
+        };
+      }
+      LS.set('table_ctx', S.ctx);
+      toast(`Connecté à : ${S.ctx.establishment?.name} · ${S.ctx.point?.label}`, 'ok');
+      location.hash = '#/menu';
+      menu();
+    } catch (e) {
+      if (btn) btn.disabled = false;
+      if (errBox) {
+        errBox.textContent = 'Code de table introuvable. Vérifiez le numéro ou scannez le QR code.';
+        errBox.style.display = 'block';
+      }
+    }
+  };
+
+  $('#quick-pt-btn')?.addEventListener('click', handleQuickCode);
+  $('#quick-pt-code')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleQuickCode();
+  });
 
   $('#open-cam-btn')?.addEventListener('click', startScanner);
   $('#close-cam-btn')?.addEventListener('click', stopScanner);
@@ -903,8 +965,8 @@ function profile() {
 async function route() {
   const h = location.hash.replace('#/', '').split('?')[0];
   if (!S.tokens?.access) {
-    // Si une table est passée dans l'URL ?q=token
-    const q = new URLSearchParams(location.search).get('q');
+    // Si une table ou code est passé dans l'URL ?q=token ou ?code=T01
+    const q = new URLSearchParams(location.search).get('q') || new URLSearchParams(location.search).get('code');
     if (q) LS.set('pending_qr', q);
     return welcome();
   }
@@ -913,13 +975,18 @@ async function route() {
     try { await loadMe(); } catch { return welcome(); }
   }
 
-  // Traiter un éventuel QR en attente
+  // Traiter un éventuel QR ou code en attente
   const pq = LS.get('pending_qr', null);
   if (pq) {
     LS.del('pending_qr');
     try {
       const info = await raw('GET', '/qr/' + encodeURIComponent(pq));
-      S.ctx = { establishment: info.establishment, zone: info.zone, point: info.point, token: pq };
+      S.ctx = {
+        establishment: info.multiple ? info.options[0].establishment : info.establishment,
+        zone: info.multiple ? info.options[0].zone : info.zone,
+        point: info.multiple ? info.options[0].point : info.point,
+        token: info.multiple ? info.options[0].token : (info.token || pq)
+      };
       LS.set('table_ctx', S.ctx);
       location.hash = '#/menu';
       return menu();
@@ -935,8 +1002,8 @@ async function route() {
 }
 
 async function init() {
-  // Détecter un token QR direct dans l'URL
-  const q = new URLSearchParams(location.search).get('q');
+  // Détecter un token QR direct ou un code court dans l'URL (?q=... ou ?code=...)
+  const q = new URLSearchParams(location.search).get('q') || new URLSearchParams(location.search).get('code');
   if (q) LS.set('pending_qr', q);
 
   if (S.tokens?.access) {

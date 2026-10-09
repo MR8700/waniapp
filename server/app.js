@@ -258,6 +258,34 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
   on('GET', '/establishments/:id/points', true, c => {
     return q('SELECT p.id,p.code,p.label,p.active,z.name zone,t.token FROM reception_points p JOIN zones z ON z.id=p.zone_id LEFT JOIN qr_tokens t ON t.reception_point_id=p.id AND t.active=1 WHERE p.establishment_id=? ORDER BY p.code', c.params.id);
   });
+  function generatePointCode(estId, label = '') {
+    let prefix = 'T';
+    const match = String(label || '').trim().match(/^(table|terrasse|salon|vip|paillote|bar|comptoir|chambre)\s*(\d+)?/i);
+    if (match) {
+      const word = match[1].toUpperCase();
+      if (word.startsWith('TER')) prefix = 'TER';
+      else if (word.startsWith('SAL')) prefix = 'SAL';
+      else if (word.startsWith('PAIL')) prefix = 'P';
+      else if (word.startsWith('VIP')) prefix = 'VIP';
+      else if (word.startsWith('BAR') || word.startsWith('COMP')) prefix = 'BAR';
+      else if (word.startsWith('CHAM')) prefix = 'CH';
+      else prefix = 'T';
+      if (match[2]) {
+        const candidate = `${prefix}${String(match[2]).padStart(2, '0')}`;
+        if (!one('SELECT 1 FROM reception_points WHERE establishment_id=? AND UPPER(code)=?', estId, candidate)) {
+          return candidate;
+        }
+      }
+    }
+    for (let i = 1; i <= 99; i++) {
+      const candidate = `${prefix}${String(i).padStart(2, '0')}`;
+      if (!one('SELECT 1 FROM reception_points WHERE establishment_id=? AND UPPER(code)=?', estId, candidate)) {
+        return candidate;
+      }
+    }
+    return 'P' + rand(4).toUpperCase();
+  }
+
   on('POST', '/establishments/:id/points', true, c => {
     need(c, c.params.id, 'MANAGER');
     let zone = c.body.zone_id ? one('SELECT * FROM zones WHERE id=? AND establishment_id=?', c.body.zone_id, c.params.id) : null;
@@ -269,23 +297,74 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
         zone = { id: zid };
       }
     }
+    const label = String(c.body.label || '').trim().slice(0, 40);
+    if (!label) throw new E(400, 'LABEL_REQUIRED');
+
+    let code = String(c.body.code || '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 15);
+    if (!code) {
+      code = generatePointCode(c.params.id, label);
+    }
+
+    const existing = one('SELECT id,active FROM reception_points WHERE establishment_id=? AND UPPER(code)=?', c.params.id, code);
+    if (existing) {
+      if (!existing.active) {
+        run('UPDATE reception_points SET label=?,zone_id=?,active=1 WHERE id=?', label, zone.id, existing.id);
+        const token = rand(16);
+        run('UPDATE qr_tokens SET active=0 WHERE reception_point_id=?', existing.id);
+        run('INSERT INTO qr_tokens VALUES(?,?,1,NULL,?)', token, existing.id, now());
+        audit(c, 'POINT_REACTIVATED', 'reception_point', existing.id, { code, label });
+        return { status: 201, body: { id: existing.id, code, label, token, zone_id: zone.id } };
+      }
+      throw new E(409, 'POINT_CODE_EXISTS');
+    }
+
     const id = uid(), token = rand(16);
-    const code = String(c.body.code || ('T' + rand(4).toUpperCase())).trim().slice(0, 15);
-    const label = String(c.body.label || code).trim().slice(0, 40);
     run('INSERT INTO reception_points VALUES(?,?,?,?,?,1)', id, c.params.id, zone.id, code, label);
     run('INSERT INTO qr_tokens VALUES(?,?,1,NULL,?)', token, id, now());
+    audit(c, 'POINT_CREATED', 'reception_point', id, { code, label });
     return { status: 201, body: { id, code, label, token, zone_id: zone.id } };
   });
   on('GET', '/establishments/:id/zones', true, c => { estOk(c.params.id); return q('SELECT * FROM zones WHERE establishment_id=? ORDER BY sort', c.params.id).map(z => ({ ...z, points: q('SELECT id,code,label FROM reception_points WHERE zone_id=? AND active=1 ORDER BY code', z.id) })); });
   on('GET', '/reception-points/:id', true, c => { const p = one('SELECT p.*,z.name zone_name FROM reception_points p JOIN zones z ON z.id=p.zone_id WHERE p.id=?', c.params.id); if (!p) throw new E(404, 'NOT_FOUND'); estOk(p.establishment_id); return p; });
-  function resolveQr(token) {
-    const t = one('SELECT * FROM qr_tokens WHERE token=?', String(token));
-    if (!t || !t.active || (t.expires_at && t.expires_at < now())) throw new E(404, 'QR_INVALID');
-    const p = one('SELECT p.*,z.name zone_name FROM reception_points p JOIN zones z ON z.id=p.zone_id WHERE p.id=? AND p.active=1', t.reception_point_id);
-    if (!p) throw new E(404, 'QR_INVALID');
-    const e = one("SELECT id,name FROM establishments WHERE id=? AND status='ACTIVE'", p.establishment_id);
-    if (!e) throw new E(404, 'ESTABLISHMENT_UNAVAILABLE');
-    return { establishment: e, zone: p.zone_name, point: { id: p.id, code: p.code, label: p.label } };
+  function resolveQr(tokenOrCode) {
+    const rawVal = String(tokenOrCode || '').trim();
+    if (!rawVal) throw new E(404, 'QR_INVALID');
+
+    // 1. Recherche par token QR
+    const t = one('SELECT * FROM qr_tokens WHERE token=?', rawVal);
+    if (t) {
+      if (!t.active || (t.expires_at && t.expires_at < now())) throw new E(404, 'QR_INVALID');
+      const p = one('SELECT p.*,z.name zone_name FROM reception_points p JOIN zones z ON z.id=p.zone_id WHERE p.id=? AND p.active=1', t.reception_point_id);
+      if (!p) throw new E(404, 'QR_INVALID');
+      const e = one("SELECT id,name,status FROM establishments WHERE id=?", p.establishment_id);
+      if (!e || e.status !== 'ACTIVE') throw new E(404, 'ESTABLISHMENT_UNAVAILABLE');
+      return { establishment: { id: e.id, name: e.name }, zone: p.zone_name, point: { id: p.id, code: p.code, label: p.label }, token: t.token };
+    }
+
+    // 2. Recherche par code court (ex: J04, T01, VIP1)
+    const upper = rawVal.toUpperCase();
+    const pts = q('SELECT p.*,z.name zone_name,t.token FROM reception_points p JOIN zones z ON z.id=p.zone_id LEFT JOIN qr_tokens t ON t.reception_point_id=p.id AND t.active=1 WHERE UPPER(p.code)=? AND p.active=1', upper);
+    if (pts.length) {
+      const activeEsts = pts.map(p => {
+        const e = one("SELECT id,name,status FROM establishments WHERE id=?", p.establishment_id);
+        return { p, e };
+      });
+      const disabled = activeEsts.find(item => item.e && item.e.status !== 'ACTIVE');
+      if (disabled && activeEsts.length === 1) {
+        throw new E(404, 'ESTABLISHMENT_UNAVAILABLE');
+      }
+      const match = activeEsts.find(item => item.e && item.e.status === 'ACTIVE');
+      if (match) {
+        return {
+          establishment: { id: match.e.id, name: match.e.name },
+          zone: match.p.zone_name,
+          point: { id: match.p.id, code: match.p.code, label: match.p.label },
+          token: match.p.token
+        };
+      }
+    }
+
+    throw new E(404, 'QR_INVALID');
   }
   on('GET', '/qr/:token', false, c => { limit(c, 'qr', 60, 60e3); return resolveQr(c.params.token); });
   on('GET', '/establishments/:id/qr', true, c => { need(c, c.params.id, 'MANAGER'); return q('SELECT t.token,t.active,p.id point_id,p.code,p.label,z.name zone FROM qr_tokens t JOIN reception_points p ON p.id=t.reception_point_id JOIN zones z ON z.id=p.zone_id WHERE p.establishment_id=?', c.params.id); });

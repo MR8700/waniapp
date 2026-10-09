@@ -170,3 +170,27 @@ test('vendeur: rachat établissement libre et utilisation code équipe', async (
   e.close();
 });
 
+test('points: résolution par code court et unicité dans établissement', async () => {
+  const { e, tok } = await setup();
+  // 1. Résolution directe par code court (ex: J04)
+  const byCode = await e.call('GET', '/qr/J04');
+  assert.equal(byCode.status, 200);
+  assert.equal(byCode.body.point.code, 'J04');
+  assert.equal(byCode.body.establishment.name, 'WANI — Bar, Grillades & Buvette');
+
+  // 2. Création avec code auto-généré
+  const autoPt = await e.call('POST', `/establishments/${e.seed.est}/points`, { label: 'Table 99' }, tok.m);
+  assert.equal(autoPt.status, 201);
+  assert.equal(autoPt.body.code, 'T99');
+
+  // 3. Doublon de code refusé (409)
+  const dupPt = await e.call('POST', `/establishments/${e.seed.est}/points`, { label: 'Autre Table', code: 'T99' }, tok.m);
+  assert.equal(dupPt.status, 409);
+
+  // 4. Code inexistant renvoie 404
+  const notFound = await e.call('GET', '/qr/INEXISTANT');
+  assert.equal(notFound.status, 404);
+
+  e.close();
+});
+
