@@ -733,7 +733,16 @@ function showAddPointModal() {
   const existingCodes = (S.points || []).map(p => (p.code || '').toUpperCase());
 
   function suggestNextCode(label = '') {
-    let prefix = 'T';
+    // 1. Préfixe dérivé de l'établissement si possible (ex: M pour Maquis, T pour Terrasse)
+    let estPfx = '';
+    if (S.currentEst?.name) {
+      const words = S.currentEst.name.toUpperCase().replace(/[^A-Z0-9\s]/g, '').split(/\s+/).filter(Boolean);
+      const stopWords = ['LE', 'LA', 'LES', 'DU', 'DE', 'DES', 'AU', 'AUX', 'CHEZ', 'ET', 'UN', 'UNE'];
+      const target = words.filter(w => !stopWords.includes(w));
+      if (target.length) estPfx = target[0][0];
+    }
+
+    let prefix = estPfx || 'T';
     const clean = label.trim();
     const match = clean.match(/^(table|terrasse|salon|vip|paillote|bar|comptoir|chambre)\s*(\d+)?/i);
     if (match) {
@@ -744,7 +753,8 @@ function showAddPointModal() {
       else if (word.startsWith('VIP')) prefix = 'VIP';
       else if (word.startsWith('BAR') || word.startsWith('COMP')) prefix = 'BAR';
       else if (word.startsWith('CHAM')) prefix = 'CH';
-      else prefix = 'T';
+      else prefix = estPfx || 'T';
+
       if (match[2]) {
         const candidate = `${prefix}${String(match[2]).padStart(2, '0')}`;
         if (!existingCodes.includes(candidate)) return candidate;
@@ -754,7 +764,7 @@ function showAddPointModal() {
       const candidate = `${prefix}${String(i).padStart(2, '0')}`;
       if (!existingCodes.includes(candidate)) return candidate;
     }
-    return `P${Math.floor(10 + Math.random() * 90)}`;
+    return `${prefix || 'P'}${Math.floor(10 + Math.random() * 90)}`;
   }
 
   const initialCode = suggestNextCode('');
@@ -780,14 +790,14 @@ function showAddPointModal() {
           Générer automatiquement un code court unique
         </label>
         <div style="font-size:0.75rem;color:#0d9488;margin-top:4px;line-height:1.4">
-          Code court et facile à mémoriser pour le client afin de diriger directement vers votre boutique.
+          Code unique et facile à mémoriser pour le client afin d'éviter toute confusion avec un autre établissement.
         </div>
 
         <div id="code-input-area" style="margin-top:10px">
-          <label class="muted" style="font-weight:700;font-size:0.8rem">Code court client (ex: T01, J04) :</label>
+          <label class="muted" style="font-weight:700;font-size:0.8rem">Code court client (ex: T500, M505) :</label>
           <input id="pt-code" value="${initialCode}" style="font-family:monospace;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-top:4px;font-size:1.05rem" maxlength="15" autocomplete="off">
           <div id="code-status" style="font-size:0.75rem;margin-top:4px;font-weight:600;color:#0f766e">
-            ✓ Code disponible et facile à saisir
+            ✓ Code disponible et unique
           </div>
         </div>
       </div>
@@ -819,7 +829,13 @@ function showAddPointModal() {
   const statusBox = $('#code-status');
   const saveBtn = $('#save-pt-btn');
 
-  function validateCode() {
+  let checkTimer = null;
+  function triggerCheck() {
+    clearTimeout(checkTimer);
+    checkTimer = setTimeout(checkCodeAvail, 250);
+  }
+
+  async function checkCodeAvail() {
     const val = (codeIn.value || '').trim().toUpperCase();
     if (!val) {
       statusBox.innerHTML = '<span style="color:var(--er)">⚠️ Le code court ne peut pas être vide.</span>';
@@ -831,15 +847,27 @@ function showAddPointModal() {
       saveBtn.disabled = true;
       return false;
     }
-    statusBox.innerHTML = '<span style="color:#0f766e">✓ Code disponible et facile à saisir</span>';
-    saveBtn.disabled = false;
-    return true;
+    try {
+      const res = await raw('GET', `/reception-points/check-code?code=${encodeURIComponent(val)}&est_id=${S.currentEst?.id || ''}`);
+      if (!res.available) {
+        statusBox.innerHTML = `<span style="color:var(--er)">⚠️ ${esc(res.message || 'Ce code est déjà utilisé.')}</span>`;
+        saveBtn.disabled = true;
+        return false;
+      }
+      statusBox.innerHTML = `<span style="color:#0f766e">✓ ${esc(res.message || 'Code disponible et unique ! Vos clients accèderont directement à votre boutique.')}</span>`;
+      saveBtn.disabled = false;
+      return true;
+    } catch {
+      statusBox.innerHTML = '<span style="color:#0f766e">✓ Code prêt à être enregistré</span>';
+      saveBtn.disabled = false;
+      return true;
+    }
   }
 
   labelIn.addEventListener('input', () => {
     if (autoChk.checked) {
       codeIn.value = suggestNextCode(labelIn.value);
-      validateCode();
+      triggerCheck();
     }
   });
 
@@ -847,7 +875,7 @@ function showAddPointModal() {
     if (autoChk.checked) {
       codeIn.value = suggestNextCode(labelIn.value);
     }
-    validateCode();
+    triggerCheck();
   });
 
   codeIn.addEventListener('input', () => {
@@ -855,14 +883,13 @@ function showAddPointModal() {
     if (autoChk.checked && codeIn.value !== suggestNextCode(labelIn.value)) {
       autoChk.checked = false;
     }
-    validateCode();
+    triggerCheck();
   });
 
   saveBtn.onclick = async () => {
     const label = labelIn.value.trim();
     const code = (codeIn.value || '').trim().toUpperCase();
     if (!label) return alert('Veuillez entrer un nom ou numéro pour ce point de livraison.');
-    if (!validateCode()) return;
 
     saveBtn.disabled = true;
     try {
@@ -872,7 +899,9 @@ function showAddPointModal() {
       tablesView();
     } catch (e) {
       saveBtn.disabled = false;
-      alert('Erreur: ' + (e.message || e));
+      const msg = e.message || String(e);
+      statusBox.innerHTML = `<span style="color:var(--er)">⚠️ ${esc(msg)}</span>`;
+      alert('Erreur : ' + msg);
     }
   };
 
