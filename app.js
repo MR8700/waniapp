@@ -401,7 +401,7 @@ async function home() {
         Entrez le code court affiché sur votre table ou reçu du serveur pour afficher directement la carte.
       </p>
       <div class="row" style="gap:8px">
-        <input id="quick-pt-code" placeholder="Ex: J04, T01, VIP1..." style="font-family:monospace;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;font-size:1.05rem" autocomplete="off">
+        <input id="quick-pt-code" placeholder="Ex: T500, M505, J04..." style="font-family:monospace;font-weight:800;letter-spacing:1.5px;text-transform:uppercase;font-size:1.05rem" autocomplete="off">
         <button class="big" id="quick-pt-btn" style="white-space:nowrap;padding:0 18px;background:var(--p)">Accéder</button>
       </div>
       <div id="quick-pt-err" style="color:var(--er);font-size:0.85rem;margin-top:8px;font-weight:600;display:none"></div>
@@ -433,7 +433,7 @@ async function home() {
     const code = ($('#quick-pt-code')?.value || '').trim();
     const errBox = $('#quick-pt-err');
     if (!code) {
-      if (errBox) { errBox.textContent = 'Veuillez saisir le code de votre table.'; errBox.style.display = 'block'; }
+      if (errBox) { errBox.textContent = 'Veuillez saisir le code de votre table (ex: T500, M505).'; errBox.style.display = 'block'; }
       return;
     }
     if (errBox) errBox.style.display = 'none';
@@ -442,21 +442,12 @@ async function home() {
 
     try {
       const info = await raw('GET', '/qr/' + encodeURIComponent(code));
-      if (info.multiple && info.options?.length) {
-        S.ctx = {
-          establishment: info.options[0].establishment,
-          zone: info.options[0].zone,
-          point: info.options[0].point,
-          token: info.options[0].token
-        };
-      } else {
-        S.ctx = {
-          establishment: info.establishment,
-          zone: info.zone,
-          point: info.point,
-          token: info.token
-        };
-      }
+      S.ctx = {
+        establishment: info.establishment,
+        zone: info.zone,
+        point: info.point,
+        token: info.token
+      };
       LS.set('table_ctx', S.ctx);
       toast(`Connecté à : ${S.ctx.establishment?.name} · ${S.ctx.point?.label}`, 'ok');
       location.hash = '#/menu';
@@ -464,7 +455,11 @@ async function home() {
     } catch (e) {
       if (btn) btn.disabled = false;
       if (errBox) {
-        errBox.textContent = 'Code de table introuvable. Vérifiez le numéro ou scannez le QR code.';
+        if (e.message && e.message.includes('ESTABLISHMENT_UNAVAILABLE')) {
+          errBox.textContent = 'Cet établissement est actuellement fermé ou indisponible.';
+        } else {
+          errBox.textContent = `Code "${code.toUpperCase()}" introuvable. Vérifiez le numéro ou scannez le QR code.`;
+        }
         errBox.style.display = 'block';
       }
     }
