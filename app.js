@@ -730,6 +730,20 @@ function renderOrders() {
               </div>
             </div>
 
+            ${o.payment_status === 'PAID' ? `
+              ${(o.cashed_by_device_id === S.me?.device_id || o.cashed_by_user_id === S.me?.id) ? `
+                <div style="background:#ecfdf5;border:1px solid #a7f3d0;padding:8px 10px;border-radius:8px;font-weight:700;color:#047857;margin-bottom:8px;font-size:0.88rem;display:flex;align-items:center;gap:6px">
+                  <span class="material-symbols-outlined text-[18px]">verified</span>
+                  Somme de ${fcfa(o.total)} encaissée par vous
+                </div>
+              ` : `
+                <div style="background:#f1f5f9;border:1px solid #cbd5e1;padding:8px 10px;border-radius:8px;font-size:0.85rem;color:#334155;margin-bottom:8px;display:flex;align-items:center;gap:6px">
+                  <span class="material-symbols-outlined text-[18px]">check_circle</span>
+                  Encaissée par <strong>${esc(o.cashed_by_name || 'Équipe')}</strong>${o.cashed_by_device_name ? ` [${esc(o.cashed_by_device_name)}]` : ''}
+                </div>
+              `}
+            ` : ''}
+
             <!-- Actions Vendeur Directes -->
             <div class="row" style="gap:8px;flex-wrap:wrap">
               ${o.status === 'SUBMITTED' ? `
@@ -775,12 +789,13 @@ function renderOrders() {
     b.onclick = async () => {
       const [id, total] = b.dataset.payBtn.split(':');
       const method = prompt('Mode de paiement : 1: Espèces, 2: Orange Money, 3: Moov Money, 4: Carte', '1');
+      if (method === null) return;
       const methods = { '1': 'CASH', '2': 'ORANGE_MONEY', '3': 'MOOV_MONEY', '4': 'CARD' };
       const chosen = methods[method] || 'CASH';
       try {
-        await api('POST', `/orders/${id}/payments`, { method: chosen, amount: Number(total) });
+        await api('POST', `/orders/${id}/payment`, { method: chosen, amount: Number(total) });
         await api('POST', `/orders/${id}/status`, { status: 'COMPLETED' });
-        toast('Commande encaissée et clôturée !');
+        toast(`Somme de ${fcfa(Number(total))} encaissée par vous !`, 'ok');
         loadOrders();
       } catch (e) {
         toast('Erreur encaissement : ' + e.message, 'error');
@@ -1073,8 +1088,24 @@ function showAddPointModal() {
     } catch (e) {
       saveBtn.disabled = false;
       const msg = e.message || String(e);
-      statusBox.innerHTML = `<span style="color:var(--er)">⚠️ ${esc(msg)}</span>`;
-      alert('Erreur : ' + msg);
+      const m = msg.match(/ex:\s*([A-Z0-9_-]+)/i);
+      const suggestedCode = m ? m[1] : null;
+      statusBox.innerHTML = `
+        <div style="background:#fef2f2;border:1px solid #fecaca;padding:10px 12px;border-radius:8px;color:#991b1b;font-size:0.85rem;margin-top:6px">
+          <div>⚠️ ${esc(msg)}</div>
+          ${suggestedCode ? `
+            <button type="button" class="sm ok" id="adopt-suggested-code" style="margin-top:8px;background:#0f766e;width:100%">
+              👉 Utiliser le code vérifié "${esc(suggestedCode)}"
+            </button>
+          ` : ''}
+        </div>
+      `;
+      if (suggestedCode) {
+        $('#adopt-suggested-code').onclick = () => {
+          codeIn.value = suggestedCode;
+          triggerCheck();
+        };
+      }
     }
   };
 
@@ -1202,15 +1233,146 @@ function showAddProdModal() {
 }
 
 // ==========================================
+// EXPORTATION & HISTORIQUE DES ENCAISSEMENTS
+// ==========================================
+function exportOrdersToCsv(orders) {
+  const headers = ['Date', 'Heure', 'Point/Table', 'Articles', 'Total_FCFA', 'Mode_Paiement', 'Encaisseur', 'Appareil'];
+  const rows = [headers.join(';')];
+  for (const o of orders) {
+    const d = new Date(o.cashed_at || o.created_at);
+    const dateStr = d.toLocaleDateString('fr-FR');
+    const timeStr = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    const itemsStr = (o.items || []).map(i => `${i.quantity}x ${i.name}`).join(' | ');
+    rows.push([
+      dateStr,
+      timeStr,
+      `"${(o.point?.label || o.reception_point_id || '').replace(/"/g, '""')}"`,
+      `"${itemsStr.replace(/"/g, '""')}"`,
+      o.total,
+      o.payment_method || 'CASH',
+      `"${(o.cashed_by_name || '').replace(/"/g, '""')}"`,
+      `"${(o.cashed_by_device_name || '').replace(/"/g, '""')}"`
+    ].join(';'));
+  }
+  return rows.join('\r\n');
+}
+
+function exportOrdersToTxt(orders, title = 'Rapport des Encaissements') {
+  const total = orders.reduce((sum, o) => sum + (o.total || 0), 0);
+  const lines = [
+    `=== WANI — ${title.toUpperCase()} ===`,
+    `Établissement : ${S.currentEst?.name || 'WANI'}`,
+    `Date d'export : ${new Date().toLocaleString('fr-FR')}`,
+    `Nombre de commandes : ${orders.length}`,
+    `Total encaissé : ${fcfa(total)}`,
+    '--------------------------------------------------',
+    ''
+  ];
+  for (const o of orders) {
+    const d = new Date(o.cashed_at || o.created_at);
+    const dateStr = d.toLocaleDateString('fr-FR');
+    const timeStr = d.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+    const itemsStr = (o.items || []).map(i => `${i.quantity}× ${i.name}`).join(', ');
+    lines.push(`• Commande #${(o.id || '').slice(0, 6)} — ${dateStr} à ${timeStr}`);
+    lines.push(`  Table : ${o.point?.label || o.reception_point_id || 'Table'}`);
+    lines.push(`  Articles : ${itemsStr}`);
+    lines.push(`  Montant : ${fcfa(o.total)} (${o.payment_method || 'Espèces'})`);
+    if (o.cashed_by_name) {
+      lines.push(`  Encaissé par : ${o.cashed_by_name}${o.cashed_by_device_name ? ` [${o.cashed_by_device_name}]` : ''}`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+function showCashedOrdersModal(orders, title = 'Commandes Encaissées') {
+  const total = orders.reduce((sum, o) => sum + (o.total || 0), 0);
+  const m = document.createElement('div');
+  m.className = 'modal-back';
+  m.innerHTML = `
+    <div class="modal-box col" style="max-width:520px;max-height:85vh;position:relative">
+      <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:8px">
+        <b class="hd" style="font-size:1.2rem">${esc(title)}</b>
+        <button class="sm sec" id="close-cashings-modal">✕</button>
+      </div>
+
+      <div style="background:#ecfdf5;border:1px solid #a7f3d0;padding:12px;border-radius:10px;text-align:center;margin-bottom:12px">
+        <span style="font-size:0.8rem;color:#047857;font-weight:700">Total encaissé</span>
+        <b style="font-size:1.8rem;color:#047857;display:block;margin:2px 0">${fcfa(total)}</b>
+        <div style="font-size:0.8rem;color:#065f46">${orders.length} commande(s) enregistrée(s)</div>
+      </div>
+
+      <!-- Actions Exportables -->
+      <div class="row" style="gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:12px">
+        <button class="sm sec" id="copy-cashings-btn">📋 Copier</button>
+        <button class="sm sec" id="csv-cashings-btn" style="border-color:#0f766e;color:#0f766e">💾 CSV</button>
+        <button class="sm sec" id="txt-cashings-btn">📄 TXT</button>
+        <button class="sm ok" id="share-cashings-btn" style="background:#0f766e">📲 Partager</button>
+      </div>
+
+      <!-- Liste détaillée des commandes -->
+      <div class="col" style="gap:8px;overflow-y:auto;max-height:360px;padding-right:4px">
+        ${orders.length ? orders.map(o => `
+          <div class="card col" style="padding:10px;border-left:4px solid #059669;gap:4px">
+            <div class="row" style="justify-content:space-between;align-items:center">
+              <div>
+                <strong>Table ${esc(o.point?.label || o.reception_point_id || 'Table')}</strong>
+                <span class="muted" style="font-size:0.75rem;margin-left:6px">
+                  ${new Date(o.cashed_at || o.created_at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                </span>
+              </div>
+              <b style="color:#047857;font-size:1.05rem">${fcfa(o.total)}</b>
+            </div>
+            <div style="font-size:0.85rem;color:var(--tx-muted)">
+              ${(o.items || []).map(i => `${i.quantity}× ${esc(i.name)}`).join(', ')}
+            </div>
+            <div class="row" style="justify-content:space-between;align-items:center;font-size:0.78rem;margin-top:2px;color:#64748b">
+              <span>💳 ${esc(o.payment_method || 'CASH')}</span>
+              ${o.cashed_by_name ? `<span>👤 ${esc(o.cashed_by_name)}${o.cashed_by_device_name ? ` [${esc(o.cashed_by_device_name)}]` : ''}</span>` : ''}
+            </div>
+          </div>
+        `).join('') : `
+          <div class="muted" style="text-align:center;padding:24px">Aucune commande encaissée pour le moment.</div>
+        `}
+      </div>
+    </div>
+  `;
+  document.body.appendChild(m);
+
+  $('#close-cashings-modal').onclick = () => m.remove();
+  m.onclick = (e) => { if (e.target === m) m.remove(); };
+
+  $('#copy-cashings-btn').onclick = () => {
+    const txt = exportOrdersToTxt(orders, title);
+    copyText(txt, 'Rapport copié dans le presse-papiers !');
+  };
+  $('#csv-cashings-btn').onclick = () => {
+    const csv = exportOrdersToCsv(orders);
+    downloadFile(`encaissements-wani-${Date.now()}.csv`, csv, 'text/csv;charset=utf-8;');
+    toast('Fichier CSV téléchargé !', 'ok');
+  };
+  $('#txt-cashings-btn').onclick = () => {
+    const txt = exportOrdersToTxt(orders, title);
+    downloadFile(`encaissements-wani-${Date.now()}.txt`, txt, 'text/plain;charset=utf-8;');
+    toast('Rapport texte téléchargé !', 'ok');
+  };
+  $('#share-cashings-btn').onclick = () => {
+    const txt = exportOrdersToTxt(orders, title);
+    shareText(`${title} - ${S.currentEst?.name}`, txt);
+  };
+}
+
+// ==========================================
 // ÉCRAN 5 : BILAN, ÉQUIPE & PARAMÈTRES ÉTABLISSEMENT
 // ==========================================
 async function statsView() {
   if (!S.currentEst) return;
-  let stats = { revenue_paid: 0, orders: [] };
+  let stats = { revenue_paid: 0, orders: [], is_manager: false, cashed_orders: [], my_cashed_orders: [], cashiers: [] };
   try {
     stats = await api('GET', `/statistics?establishment_id=${S.currentEst.id}`);
   } catch {}
 
+  const isManager = S.currentEst?.role === 'MANAGER' || !!stats.is_manager;
   const bioActive = localStorage.getItem('wani_bio_enabled') === '1';
 
   shell('Bilan & Équipe', `
@@ -1218,7 +1380,7 @@ async function statsView() {
     <div class="card col" style="gap:14px;text-align:left">
       <div class="row" style="justify-content:space-between;align-items:center">
         <b style="font-size:1.15rem;color:var(--tx)">Votre Établissement</b>
-        <span class="pill" style="font-size:0.75rem">${S.currentEst?.role === 'MANAGER' ? 'Gérant' : 'Équipe'}</span>
+        <span class="pill" style="font-size:0.75rem">${isManager ? 'Gérant Principal' : 'Serveur / Équipe'}</span>
       </div>
 
       <!-- Aperçu et modification du Logo -->
@@ -1260,27 +1422,102 @@ async function statsView() {
       </div>
     </div>
 
-    <!-- 2. Recette Totale -->
-    <div class="card" style="text-align:center;padding:20px 16px;background:#ecfdf5;border-color:#6ee7b7">
-      <span class="muted" style="font-size:0.85rem">Recette totale encaissée</span>
-      <b style="font-size:2rem;color:#047857;display:block;margin-top:4px">${fcfa(stats.revenue_paid || 0)}</b>
-    </div>
-
-    <!-- 3. Inviter un serveur / employé -->
-    <div class="card col" style="gap:10px">
-      <b style="font-size:1.1rem">Inviter un serveur / employé</b>
-      <p class="muted" style="margin:0;font-size:0.85rem">
-        Générez un code temporaire pour permettre à un serveur ou caissier d'accéder au tableau de bord sans mot de passe.
-      </p>
-      <button class="big sm" id="gen-invite-btn" style="background:#0f766e">Générer un code serveur (24h)</button>
-      <div id="invite-box" style="display:none;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;text-align:center">
-        <div id="invite-code-txt" style="font-family:monospace;font-size:1.4rem;font-weight:900;letter-spacing:2px;color:#042f2e;margin-bottom:8px"></div>
-        <div class="row" style="gap:8px;justify-content:center">
-          <button class="sm sec" id="copy-invite-btn">📋 Copier le code</button>
-          <button class="sm ok" id="share-invite-btn" style="background:#0f766e">📲 Partager</button>
+    <!-- 2. Section Encaissements / Bilan Financier -->
+    ${!isManager ? `
+      <!-- Vue Serveur / Invité : UNIQUEMENT ses propres encaissements -->
+      <div class="card col clickable" id="my-cashings-card" style="text-align:center;padding:22px 16px;background:#ecfdf5;border:2px solid #6ee7b7;border-radius:12px;cursor:pointer;box-shadow:0 2px 8px rgba(16,185,129,0.1)">
+        <span style="font-size:0.85rem;color:#047857;font-weight:700">Somme encaissée par vous</span>
+        <b style="font-size:2.2rem;color:#047857;display:block;margin:4px 0">${fcfa(stats.my_revenue_paid || 0)}</b>
+        <div style="display:inline-flex;align-items:center;gap:6px;background:#059669;color:#fff;padding:6px 14px;border-radius:999px;font-size:0.85rem;font-weight:700;margin:4px auto 0">
+          <span class="material-symbols-outlined text-[16px]">receipt_long</span>
+          ${stats.my_orders_count || 0} commande(s) encaissée(s) par vous • Toucher pour voir le détail 🔍
         </div>
       </div>
-    </div>
+    ` : `
+      <!-- Vue Gérant Principal : Recette globale et Historique complet filtrable -->
+      <div class="card" style="text-align:center;padding:20px 16px;background:#ecfdf5;border-color:#6ee7b7">
+        <span class="muted" style="font-size:0.85rem">Recette totale de l'établissement</span>
+        <b style="font-size:2.2rem;color:#047857;display:block;margin-top:4px">${fcfa(stats.revenue_paid || 0)}</b>
+        <div class="muted" style="font-size:0.85rem;margin-top:4px">${stats.total_orders_count || 0} commande(s) encaissée(s) au total</div>
+        ${stats.my_revenue_paid ? `
+          <div style="font-size:0.8rem;color:#065f46;margin-top:6px;font-weight:600">
+            (Dont ${fcfa(stats.my_revenue_paid)} encaissés personnellement par vous)
+          </div>
+        ` : ''}
+      </div>
+
+      <!-- Historique des commandes encaissées filtrable pour le gérant -->
+      <div class="card col" style="gap:12px">
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <b style="font-size:1.1rem;color:var(--tx)">📋 Commandes encaissées &amp; Équipe</b>
+          <button class="sm sec" id="btn-all-orders" style="font-size:0.75rem">Toutes les commandes</button>
+        </div>
+
+        <!-- Filtres interactifs : Date, Heure, Nom Encaisseur -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;background:#f8fafc;padding:10px;border-radius:10px;border:1px solid #e2e8f0">
+          <div class="col" style="gap:4px">
+            <label style="font-size:0.75rem;font-weight:700;color:var(--tx-muted)">Date :</label>
+            <div class="row" style="gap:4px">
+              <input type="date" id="filter-date" style="padding:6px;font-size:0.82rem;flex:1">
+              <button class="sm sec" id="btn-today-filter" style="padding:0 8px;font-size:0.75rem">Auj.</button>
+            </div>
+          </div>
+
+          <div class="col" style="gap:4px">
+            <label style="font-size:0.75rem;font-weight:700;color:var(--tx-muted)">Créneau horaire :</label>
+            <select id="filter-hour" style="padding:6px;font-size:0.82rem">
+              <option value="">Toutes les heures</option>
+              <option value="matin">Matin (06h - 12h)</option>
+              <option value="midi">Midi (12h - 15h)</option>
+              <option value="aprem">Après-midi (15h - 19h)</option>
+              <option value="soir">Soirée (19h - 00h)</option>
+              <option value="nuit">Nuit (00h - 06h)</option>
+            </select>
+          </div>
+
+          <div class="col" style="gap:4px;grid-column:span 2">
+            <label style="font-size:0.75rem;font-weight:700;color:var(--tx-muted)">Nom de l'encaisseur :</label>
+            <select id="filter-cashier" style="padding:6px;font-size:0.85rem">
+              <option value="">Tous les encaisseurs</option>
+              ${(stats.cashiers || []).map(c => `
+                <option value="${esc(c.user_id)}">${esc(c.name || 'Inconnu')}</option>
+              `).join('')}
+            </select>
+          </div>
+        </div>
+
+        <!-- Barre de résumé dynamique & Exports -->
+        <div class="row" style="justify-content:space-between;align-items:center;background:#f0fdfa;border:1px solid #ccfbf1;padding:8px 10px;border-radius:8px">
+          <div id="filter-summary-txt" style="font-size:0.85rem;font-weight:700;color:#0f766e"></div>
+          <div class="row" style="gap:4px">
+            <button class="sm sec" id="copy-filtered-btn" title="Copier le résumé">📋 Copier</button>
+            <button class="sm sec" id="csv-filtered-btn" title="Télécharger CSV" style="border-color:#0f766e;color:#0f766e">💾 CSV</button>
+            <button class="sm ok" id="share-filtered-btn" style="background:#0f766e" title="Partager">📲 Partager</button>
+          </div>
+        </div>
+
+        <!-- Liste des commandes filtrées -->
+        <div id="filtered-orders-list" class="col" style="gap:8px;max-height:420px;overflow-y:auto;padding-right:2px"></div>
+      </div>
+    `}
+
+    <!-- 3. Inviter un serveur / employé (accessible au gérant) -->
+    ${isManager ? `
+      <div class="card col" style="gap:10px">
+        <b style="font-size:1.1rem">Inviter un serveur / employé</b>
+        <p class="muted" style="margin:0;font-size:0.85rem">
+          Générez un code temporaire pour permettre à un serveur ou caissier d'accéder au tableau de bord sans mot de passe.
+        </p>
+        <button class="big sm" id="gen-invite-btn" style="background:#0f766e">Générer un code serveur (24h)</button>
+        <div id="invite-box" style="display:none;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;text-align:center">
+          <div id="invite-code-txt" style="font-family:monospace;font-size:1.4rem;font-weight:900;letter-spacing:2px;color:#042f2e;margin-bottom:8px"></div>
+          <div class="row" style="gap:8px;justify-content:center">
+            <button class="sm sec" id="copy-invite-btn">📋 Copier le code</button>
+            <button class="sm ok" id="share-invite-btn" style="background:#0f766e">📲 Partager</button>
+          </div>
+        </div>
+      </div>
+    ` : ''}
 
     <!-- 4. Sécurité, Biométrie, Appareils & Codes de secours -->
     <div class="card col" style="gap:12px">
@@ -1362,6 +1599,125 @@ async function statsView() {
       <button class="sec sm" id="v-logout-btn" style="color:var(--er);margin-top:8px">Se déconnecter de cet appareil</button>
     </div>
   `, 'stats');
+
+  // Clic sur le bilan personnel (invité)
+  $('#my-cashings-card')?.addEventListener('click', () => {
+    showCashedOrdersModal(stats.my_cashed_orders || [], 'Vos encaissements personnels');
+  });
+
+  // Logique de filtrage des commandes pour le gérant
+  if (isManager) {
+    const allCashedOrders = stats.cashed_orders || [];
+    const dateInput = $('#filter-date');
+    const hourSelect = $('#filter-hour');
+    const cashierSelect = $('#filter-cashier');
+    const summaryTxt = $('#filter-summary-txt');
+    const listContainer = $('#filtered-orders-list');
+
+    let currentFiltered = [...allCashedOrders];
+
+    function applyFilters() {
+      if (!listContainer) return;
+      const dateVal = dateInput?.value || '';
+      const hourVal = hourSelect?.value || '';
+      const cashierVal = cashierSelect?.value || '';
+
+      currentFiltered = allCashedOrders.filter(o => {
+        const d = new Date(o.cashed_at || o.created_at);
+        if (dateVal) {
+          const isoDate = d.toISOString().slice(0, 10);
+          if (isoDate !== dateVal) return false;
+        }
+        if (hourVal) {
+          const h = d.getHours();
+          if (hourVal === 'matin' && (h < 6 || h >= 12)) return false;
+          if (hourVal === 'midi' && (h < 12 || h >= 15)) return false;
+          if (hourVal === 'aprem' && (h < 15 || h >= 19)) return false;
+          if (hourVal === 'soir' && (h < 19 || h > 23)) return false;
+          if (hourVal === 'nuit' && (h >= 6)) return false;
+        }
+        if (cashierVal && o.cashed_by_user_id !== cashierVal) {
+          return false;
+        }
+        return true;
+      });
+
+      const sum = currentFiltered.reduce((acc, o) => acc + (o.total || 0), 0);
+      if (summaryTxt) {
+        summaryTxt.textContent = `${currentFiltered.length} commande(s) • Total : ${fcfa(sum)}`;
+      }
+
+      if (!currentFiltered.length) {
+        listContainer.innerHTML = '<div class="muted" style="text-align:center;padding:24px;font-size:0.85rem">Aucune commande correspondant à ces filtres.</div>';
+        return;
+      }
+
+      listContainer.innerHTML = currentFiltered.map(o => `
+        <div class="card col clickable" data-order-detail-id="${o.id}" style="padding:10px;border-left:4px solid #059669;gap:4px;cursor:pointer">
+          <div class="row" style="justify-content:space-between;align-items:center">
+            <div>
+              <strong>Table ${esc(o.point?.label || o.reception_point_id || 'Table')}</strong>
+              <span class="muted" style="font-size:0.75rem;margin-left:6px">
+                ${new Date(o.cashed_at || o.created_at).toLocaleString('fr-FR', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+              </span>
+            </div>
+            <b style="color:#047857;font-size:1.05rem">${fcfa(o.total)}</b>
+          </div>
+          <div style="font-size:0.85rem;color:var(--tx-muted)">
+            ${(o.items || []).map(i => `${i.quantity}× ${esc(i.name)}`).join(', ')}
+          </div>
+          <div class="row" style="justify-content:space-between;align-items:center;font-size:0.78rem;margin-top:2px;color:#64748b">
+            <span>💳 ${esc(o.payment_method || 'CASH')}</span>
+            <span>👤 ${esc(o.cashed_by_name || 'Équipe')}${o.cashed_by_device_name ? ` [${esc(o.cashed_by_device_name)}]` : ''}</span>
+          </div>
+        </div>
+      `).join('');
+
+      listContainer.querySelectorAll('[data-order-detail-id]').forEach(card => {
+        card.onclick = () => {
+          const id = card.getAttribute('data-order-detail-id');
+          const target = currentFiltered.find(x => x.id === id);
+          if (target) showCashedOrdersModal([target], `Détail Commande #${target.id.slice(0, 6)}`);
+        };
+      });
+    }
+
+    dateInput?.addEventListener('input', applyFilters);
+    hourSelect?.addEventListener('change', applyFilters);
+    cashierSelect?.addEventListener('change', applyFilters);
+
+    $('#btn-today-filter')?.addEventListener('click', () => {
+      if (dateInput) {
+        dateInput.value = new Date().toISOString().slice(0, 10);
+        applyFilters();
+      }
+    });
+
+    $('#btn-all-orders')?.addEventListener('click', () => {
+      if (dateInput) dateInput.value = '';
+      if (hourSelect) hourSelect.value = '';
+      if (cashierSelect) cashierSelect.value = '';
+      applyFilters();
+    });
+
+    $('#copy-filtered-btn')?.addEventListener('click', () => {
+      const txt = exportOrdersToTxt(currentFiltered, 'Commandes Filtrées');
+      copyText(txt, 'Rapport des commandes filtrées copié !');
+    });
+
+    $('#csv-filtered-btn')?.addEventListener('click', () => {
+      const csv = exportOrdersToCsv(currentFiltered);
+      downloadFile(`commandes-encaissees-${Date.now()}.csv`, csv, 'text/csv;charset=utf-8;');
+      toast('Export CSV téléchargé !', 'ok');
+    });
+
+    $('#share-filtered-btn')?.addEventListener('click', () => {
+      const txt = exportOrdersToTxt(currentFiltered, 'Commandes Filtrées');
+      shareText(`Commandes Encaissées - ${S.currentEst?.name}`, txt);
+    });
+
+    applyFilters();
+  }
 
   // Gérer l'upload du logo
   $('#est-logo-file')?.addEventListener('change', async (e) => {
