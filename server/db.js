@@ -20,8 +20,9 @@ CREATE TABLE IF NOT EXISTS qr_tokens(token TEXT PRIMARY KEY,reception_point_id T
 CREATE TABLE IF NOT EXISTS categories(id TEXT PRIMARY KEY,establishment_id TEXT,name TEXT,sort INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY,establishment_id TEXT,category_id TEXT,name TEXT,description TEXT,price INTEGER NOT NULL,image TEXT,aliases TEXT DEFAULT '',available INTEGER DEFAULT 1,stock_tracking INTEGER DEFAULT 0,status TEXT DEFAULT 'ACTIVE',created_at INTEGER,updated_at INTEGER);
 CREATE INDEX IF NOT EXISTS ix_prod_est ON products(establishment_id);
-CREATE TABLE IF NOT EXISTS orders(id TEXT PRIMARY KEY,establishment_id TEXT,user_id TEXT,device_id TEXT,reception_point_id TEXT,status TEXT,payment_status TEXT DEFAULT 'UNPAID',payment_method TEXT,total INTEGER,note TEXT,voice_message_id TEXT,created_at INTEGER,updated_at INTEGER);
+CREATE TABLE IF NOT EXISTS orders(id TEXT PRIMARY KEY,establishment_id TEXT,user_id TEXT,device_id TEXT,reception_point_id TEXT,status TEXT,payment_status TEXT DEFAULT 'UNPAID',payment_method TEXT,total INTEGER,note TEXT,voice_message_id TEXT,cashed_by_user_id TEXT,cashed_by_device_id TEXT,cashed_by_name TEXT,cashed_by_device_name TEXT,cashed_at INTEGER,created_at INTEGER,updated_at INTEGER);
 CREATE INDEX IF NOT EXISTS ix_ord_est ON orders(establishment_id,status);CREATE INDEX IF NOT EXISTS ix_ord_user ON orders(user_id);
+CREATE INDEX IF NOT EXISTS ix_ord_cashed ON orders(establishment_id,payment_status,cashed_by_user_id);
 CREATE TABLE IF NOT EXISTS order_items(id TEXT PRIMARY KEY,order_id TEXT,product_id TEXT,name TEXT,unit_price INTEGER,quantity INTEGER,total INTEGER,note TEXT);
 CREATE INDEX IF NOT EXISTS ix_oi_order ON order_items(order_id);
 CREATE TABLE IF NOT EXISTS order_status_history(id TEXT PRIMARY KEY,order_id TEXT,previous_status TEXT,new_status TEXT,actor_id TEXT,device_id TEXT,created_at INTEGER);
@@ -46,6 +47,11 @@ export function openDb(path = ':memory:') {
   if (path !== ':memory:') db.exec('PRAGMA journal_mode=WAL;');
   db.exec(SCHEMA);
   try { db.exec('ALTER TABLE establishments ADD COLUMN logo TEXT;'); } catch {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN cashed_by_user_id TEXT;'); } catch {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN cashed_by_device_id TEXT;'); } catch {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN cashed_by_name TEXT;'); } catch {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN cashed_by_device_name TEXT;'); } catch {}
+  try { db.exec('ALTER TABLE orders ADD COLUMN cashed_at INTEGER;'); } catch {}
   return db;
 }
 

@@ -226,7 +226,7 @@ test('points: unicité globale inter-établissements (ex: E1=T500, E2=M505) et r
     code: 'T500'
   }, tok2);
   assert.equal(dupOtherEst.status, 409);
-  assert.ok(dupOtherEst.body.message.includes('déjà utilisé par l\'établissement'));
+  assert.equal(dupOtherEst.body.message, 'Le code "T500" est déjà utilisé. Veuillez choisir un code différent (ex: M105 generé et verifié par le serveur) pour éviter toute confusion.');
 
   // E2 définit son propre code "M505" pour "Salle1 Table 1" -> Succès
   const ptE2 = await e.call('POST', `/establishments/${est2Id}/points`, {
@@ -314,6 +314,96 @@ test('établissement & sécurité: modification nom, logo, codes secours et asso
 
   e.close();
 });
+
+test('encaissement: traçabilité encaisseur/appareil, isolation stricte invité et vue filtrable gérant', async () => {
+  const { e, tok, P, qr } = await setup();
+
+  // 1. Gérant invite deux serveurs : Moussa et Ami
+  const inv1 = await e.call('POST', `/establishments/${e.seed.est}/invites`, { role: 'STAFF' }, tok.m);
+  const devS1 = await newDevice(e, { name: 'Téléphone Moussa', user_name: 'Moussa' });
+  const tokS1 = await devS1.token();
+  const join1 = await e.call('POST', '/invites/redeem', { code: inv1.body.code }, tokS1);
+  assert.equal(join1.status, 200);
+
+  const inv2 = await e.call('POST', `/establishments/${e.seed.est}/invites`, { role: 'STAFF' }, tok.m);
+  const devS2 = await newDevice(e, { name: 'Téléphone Ami', user_name: 'Ami' });
+  const tokS2 = await devS2.token();
+  const join2 = await e.call('POST', '/invites/redeem', { code: inv2.body.code }, tokS2);
+  assert.equal(join2.status, 200);
+
+  // 2. Client passe 2 commandes
+  const o1Res = await order(e, tok.c, qr, [{ product_id: P('Brakina').id, quantity: 2 }], 'idemp-cash-1');
+  assert.equal(o1Res.status, 201);
+  const o1 = o1Res.body;
+
+  const o2Res = await order(e, tok.c, qr, [{ product_id: P('Poulet bicyclette').id, quantity: 1 }], 'idemp-cash-2');
+  assert.equal(o2Res.status, 201);
+  const o2 = o2Res.body;
+
+  // 3. Moussa encaisse la commande 1
+  const pay1 = await e.call('POST', `/orders/${o1.id}/payment`, { method: 'CASH', amount: o1.total }, tokS1);
+  assert.equal(pay1.status, 200);
+  assert.equal(pay1.body.payment_status, 'PAID');
+  assert.equal(pay1.body.cashed_by_user_id, devS1.user_id);
+  assert.equal(pay1.body.cashed_by_device_name, 'Téléphone Moussa');
+  assert.ok(pay1.body.cashed_by_name.includes('Moussa'));
+  await e.call('POST', `/orders/${o1.id}/status`, { status: 'COMPLETED' }, tokS1);
+
+  // 4. Ami encaisse la commande 2
+  const pay2 = await e.call('POST', `/orders/${o2.id}/payment`, { method: 'ORANGE_MONEY', amount: o2.total }, tokS2);
+  assert.equal(pay2.status, 200);
+  assert.equal(pay2.body.payment_status, 'PAID');
+  assert.equal(pay2.body.cashed_by_user_id, devS2.user_id);
+  assert.equal(pay2.body.cashed_by_device_name, 'Téléphone Ami');
+  assert.ok(pay2.body.cashed_by_name.includes('Ami'));
+  await e.call('POST', `/orders/${o2.id}/status`, { status: 'COMPLETED' }, tokS2);
+
+  // 5. Vérification isolation chez Moussa (STAFF)
+  // Il ne voit QUE ses propres encaissements et jamais ceux d'Ami
+  const statsS1 = await e.call('GET', `/statistics?establishment_id=${e.seed.est}`, null, tokS1);
+  assert.equal(statsS1.status, 200);
+  assert.equal(statsS1.body.is_manager, false);
+  assert.equal(statsS1.body.my_revenue_paid, o1.total);
+  assert.equal(statsS1.body.my_orders_count, 1);
+  assert.equal(statsS1.body.my_cashed_orders.length, 1);
+  assert.equal(statsS1.body.my_cashed_orders[0].id, o1.id);
+  // Ne contient pas la commande d'Ami
+  assert.ok(!statsS1.body.cashed_orders);
+
+  const ordersS1 = await e.call('GET', `/orders?establishment_id=${e.seed.est}&status=COMPLETED`, null, tokS1);
+  assert.equal(ordersS1.body.length, 1);
+  assert.equal(ordersS1.body[0].id, o1.id);
+
+  // 6. Vérification isolation chez Ami (STAFF)
+  const statsS2 = await e.call('GET', `/statistics?establishment_id=${e.seed.est}`, null, tokS2);
+  assert.equal(statsS2.status, 200);
+  assert.equal(statsS2.body.is_manager, false);
+  assert.equal(statsS2.body.my_revenue_paid, o2.total);
+  assert.equal(statsS2.body.my_orders_count, 1);
+  assert.equal(statsS2.body.my_cashed_orders[0].id, o2.id);
+
+  // 7. Vérification chez le Gérant principal (MANAGER)
+  // Voit la recette totale, la liste complète et peut filtrer par encaisseur
+  const statsMgr = await e.call('GET', `/statistics?establishment_id=${e.seed.est}`, null, tok.m);
+  assert.equal(statsMgr.status, 200);
+  assert.equal(statsMgr.body.is_manager, true);
+  assert.equal(statsMgr.body.revenue_paid, o1.total + o2.total);
+  assert.equal(statsMgr.body.total_orders_count, 2);
+  assert.equal(statsMgr.body.cashed_orders.length, 2);
+  assert.equal(statsMgr.body.cashiers.length, 2);
+
+  // Filtrage des commandes par encaisseur pour le gérant
+  const filterMoussa = await e.call('GET', `/orders?establishment_id=${e.seed.est}&cashed_by_user_id=${devS1.user_id}`, null, tok.m);
+  assert.equal(filterMoussa.body.length, 1);
+  assert.equal(filterMoussa.body[0].id, o1.id);
+
+  const filterAmi = await e.call('GET', `/orders?establishment_id=${e.seed.est}&cashed_by_user_id=${devS2.user_id}`, null, tok.m);
+  assert.equal(filterAmi.body.length, 1);
+  assert.equal(filterAmi.body[0].id, o2.id);
+
+  e.close();
+});
+
 
 
 

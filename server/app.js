@@ -302,10 +302,20 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
       return { available: false, reason: 'SAME_EST_EXISTS', message: `Le code "${raw}" existe déjà dans votre établissement.` };
     }
 
+    // Trouver une suggestion vérifiée disponible sur le serveur (ex: M105)
+    let suggestion = 'M105';
+    for (const cand of ['M105', 'M505', 'P105', 'T105', 'M01', 'P01']) {
+      if (cand !== raw && !one('SELECT 1 FROM reception_points WHERE UPPER(code)=? AND active=1', cand)) {
+        suggestion = cand;
+        break;
+      }
+    }
+
     return {
       available: false,
       reason: 'OTHER_EST_EXISTS',
-      message: `Le code "${raw}" est déjà utilisé par l'établissement "${existing.est_name}". Veuillez choisir un code différent (ex: M505) pour éviter toute confusion.`
+      suggestion,
+      message: `Le code "${raw}" est déjà utilisé. Veuillez choisir un code différent (ex: ${suggestion} generé et verifié par le serveur) pour éviter toute confusion.`
     };
   }
 
@@ -648,7 +658,7 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
         if (!vm) throw new E(400, 'INVALID_VOICE');
       }
 
-      run('INSERT INTO orders VALUES(?,?,?,?,?,?,?,NULL,?,?,?,?,?)', id, loc.establishment.id, c.user.id, c.device.id, loc.point.id, 'SUBMITTED', 'UNPAID', total, String(b.note || '').slice(0, 200), vm?.id || null, now(), now());
+      run('INSERT INTO orders (id,establishment_id,user_id,device_id,reception_point_id,status,payment_status,total,note,voice_message_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)', id, loc.establishment.id, c.user.id, c.device.id, loc.point.id, 'SUBMITTED', 'UNPAID', total, String(b.note || '').slice(0, 200), vm?.id || null, now(), now());
       for (const [p, qty, note] of lines) {
         run('INSERT INTO order_items VALUES(?,?,?,?,?,?,?,?)', uid(), id, p.id, p.name, p.price, qty, p.price * qty, note);
         if (p.stock_tracking) run('INSERT INTO stock_movements VALUES(?,?,?,?,?,?,?)', uid(), p.id, 'SALE', -qty, 'order', c.user.id, now());
@@ -671,7 +681,44 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
   on('GET', '/orders', true, c => {
     expireStale();
     const est = c.query.get('establishment_id');
-    if (est) { need(c, est, 'STAFF'); const st = c.query.get('status'); return q(`SELECT * FROM orders WHERE establishment_id=? ${st ? 'AND status=?' : ''} ORDER BY created_at DESC LIMIT 200`, ...(st ? [est, st] : [est])).map(full); }
+    if (est) {
+      need(c, est, 'STAFF');
+      const member = one('SELECT role FROM establishment_members WHERE user_id=? AND establishment_id=?', c.user.id, est);
+      const isManager = member?.role === 'MANAGER';
+      const st = c.query.get('status');
+      const paymentStatus = c.query.get('payment_status');
+      const cashedBy = c.query.get('cashed_by_user_id');
+
+      let sql = 'SELECT * FROM orders WHERE establishment_id=?';
+      const params = [est];
+
+      if (st) {
+        sql += ' AND status=?';
+        params.push(st);
+      }
+      if (paymentStatus) {
+        sql += ' AND payment_status=?';
+        params.push(paymentStatus);
+      }
+
+      if (!isManager) {
+        if (paymentStatus === 'PAID' || st === 'COMPLETED') {
+          sql += ' AND cashed_by_user_id=?';
+          params.push(c.user.id);
+        } else if (!st) {
+          sql += " AND (status NOT IN ('COMPLETED','CANCELLED','REJECTED') OR cashed_by_user_id=?)";
+          params.push(c.user.id);
+        }
+      } else {
+        if (cashedBy) {
+          sql += ' AND cashed_by_user_id=?';
+          params.push(cashedBy);
+        }
+      }
+
+      sql += ' ORDER BY created_at DESC LIMIT 300';
+      return q(sql, ...params).map(full);
+    }
     return q('SELECT * FROM orders WHERE user_id=? ORDER BY created_at DESC LIMIT 100', c.user.id).map(full);
   });
   on('GET', '/orders/:id', true, c => full(getOrder(c)));
@@ -689,20 +736,50 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
     if (next === 'COMPLETED' && o.payment_status !== 'PAID') throw new E(409, 'PAYMENT_REQUIRED');
     tx(db, () => setStatus(c, o, next)); return { status: next };
   });
-  on('POST', '/orders/:id/payment', true, c => {
+
+  const handlePayment = c => {
     const o = one('SELECT * FROM orders WHERE id=?', c.params.id); if (!o) throw new E(404, 'NOT_FOUND'); need(c, o.establishment_id, 'STAFF');
-    const b = c.body; if (!PAYMENT_METHODS.includes(b.method)) throw new E(400, 'INVALID_METHOD');
+    const b = c.body || {}; if (!PAYMENT_METHODS.includes(b.method)) throw new E(400, 'INVALID_METHOD');
     if (o.payment_status === 'PAID') throw new E(409, 'ALREADY_PAID'); if (['CANCELLED', 'REJECTED'].includes(o.status)) throw new E(409, 'ORDER_CLOSED');
     const amount = b.amount ?? o.total; if (!Number.isInteger(amount) || amount < o.total) throw new E(400, 'INVALID_AMOUNT');
+
+    const member = one('SELECT role FROM establishment_members WHERE user_id=? AND establishment_id=?', c.user.id, o.establishment_id);
+    const roleLabel = member?.role === 'MANAGER' ? 'Gérant' : 'Serveur';
+    const cashedByName = c.user?.display_name ? `${c.user.display_name} (${roleLabel})` : roleLabel;
+    const cashedByDevName = c.device?.device_name || 'Appareil';
+    const cashedAt = now();
+
     tx(db, () => {
-      run('INSERT INTO payments VALUES(?,?,?,?,?,?,?)', uid(), o.id, b.method, o.total, 'PAID', c.user.id, now());
-      run("UPDATE orders SET payment_status='PAID',payment_method=?,updated_at=? WHERE id=?", b.method, now(), o.id);
-      audit(c, 'PAYMENT_VALIDATED', 'order', o.id, { method: b.method, amount: o.total });
+      run('INSERT INTO payments VALUES(?,?,?,?,?,?,?)', uid(), o.id, b.method, o.total, 'PAID', c.user.id, cashedAt);
+      run("UPDATE orders SET payment_status='PAID',payment_method=?,cashed_by_user_id=?,cashed_by_device_id=?,cashed_by_name=?,cashed_by_device_name=?,cashed_at=?,updated_at=? WHERE id=?", b.method, c.user.id, c.device?.id || null, cashedByName, cashedByDevName, cashedAt, cashedAt, o.id);
+      audit(c, 'PAYMENT_VALIDATED', 'order', o.id, { method: b.method, amount: o.total, cashed_by: cashedByName, device: cashedByDevName });
       notify({ user_id: o.user_id, order: o.id, type: 'PAID', message: 'Paiement confirmé' });
-      broadcast('ORDER_PAID', { order_id: o.id, payment_status: 'PAID', method: b.method, user_id: o.user_id, establishment_id: o.establishment_id });
+      broadcast('ORDER_PAID', {
+        order_id: o.id,
+        payment_status: 'PAID',
+        method: b.method,
+        total: o.total,
+        cashed_by_user_id: c.user.id,
+        cashed_by_device_id: c.device?.id || null,
+        cashed_by_name: cashedByName,
+        cashed_by_device_name: cashedByDevName,
+        cashed_at: cashedAt,
+        user_id: o.user_id,
+        establishment_id: o.establishment_id
+      });
     });
-    return { payment_status: 'PAID' };
-  });
+    return {
+      payment_status: 'PAID',
+      total: o.total,
+      cashed_by_user_id: c.user.id,
+      cashed_by_device_id: c.device?.id || null,
+      cashed_by_name: cashedByName,
+      cashed_by_device_name: cashedByDevName,
+      cashed_at: cashedAt
+    };
+  };
+  on('POST', '/orders/:id/payment', true, handlePayment);
+  on('POST', '/orders/:id/payments', true, handlePayment);
   on('GET', '/payment-methods', true, () => PAYMENT_METHODS);
 
   // TEMPS RÉEL (Server-Sent Events)
@@ -791,11 +868,39 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
 
   // STATS
   on('GET', '/statistics', true, c => {
-    const est = String(c.query.get('establishment_id')); need(c, est, 'MANAGER');
+    const est = String(c.query.get('establishment_id'));
+    need(c, est, 'STAFF');
+    const member = one('SELECT role FROM establishment_members WHERE user_id=? AND establishment_id=?', c.user.id, est);
+    const isManager = member?.role === 'MANAGER';
+
+    const myRevenue = one("SELECT COALESCE(SUM(total),0) t FROM orders WHERE establishment_id=? AND payment_status='PAID' AND cashed_by_user_id=?", est, c.user.id).t;
+    const myOrdersCount = one("SELECT COUNT(*) n FROM orders WHERE establishment_id=? AND payment_status='PAID' AND cashed_by_user_id=?", est, c.user.id).n;
+    const myCashedOrders = q("SELECT * FROM orders WHERE establishment_id=? AND payment_status='PAID' AND cashed_by_user_id=? ORDER BY cashed_at DESC LIMIT 200", est, c.user.id).map(full);
+
+    if (!isManager) {
+      return {
+        is_manager: false,
+        my_revenue_paid: myRevenue,
+        my_orders_count: myOrdersCount,
+        my_cashed_orders: myCashedOrders,
+        revenue_paid: myRevenue
+      };
+    }
+
+    const allCashedOrders = q("SELECT * FROM orders WHERE establishment_id=? AND payment_status='PAID' ORDER BY cashed_at DESC LIMIT 500", est).map(full);
+    const cashiers = q("SELECT DISTINCT cashed_by_user_id user_id, cashed_by_name name FROM orders WHERE establishment_id=? AND payment_status='PAID' AND cashed_by_name IS NOT NULL", est);
+
     return {
-      orders: q('SELECT status,COUNT(*) n,SUM(total) total FROM orders WHERE establishment_id=? GROUP BY status', est),
+      is_manager: true,
       revenue_paid: one("SELECT COALESCE(SUM(total),0) t FROM orders WHERE establishment_id=? AND payment_status='PAID'", est).t,
+      total_orders_count: one("SELECT COUNT(*) n FROM orders WHERE establishment_id=? AND payment_status='PAID'", est).n,
+      my_revenue_paid: myRevenue,
+      my_orders_count: myOrdersCount,
+      my_cashed_orders: myCashedOrders,
+      orders: q('SELECT status,COUNT(*) n,SUM(total) total FROM orders WHERE establishment_id=? GROUP BY status', est),
       top_products: q("SELECT i.name,SUM(i.quantity) qty FROM order_items i JOIN orders o ON o.id=i.order_id WHERE o.establishment_id=? AND o.status NOT IN ('CANCELLED','REJECTED') GROUP BY i.name ORDER BY qty DESC LIMIT 5", est),
+      cashiers,
+      cashed_orders: allCashedOrders
     };
   });
 
