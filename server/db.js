@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS establishments(id TEXT PRIMARY KEY,name TEXT,status T
 CREATE TABLE IF NOT EXISTS establishment_members(user_id TEXT,establishment_id TEXT,role TEXT NOT NULL,PRIMARY KEY(user_id,establishment_id));
 CREATE TABLE IF NOT EXISTS zones(id TEXT PRIMARY KEY,establishment_id TEXT,name TEXT,sort INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS reception_points(id TEXT PRIMARY KEY,establishment_id TEXT,zone_id TEXT,code TEXT,label TEXT,active INTEGER DEFAULT 1,UNIQUE(establishment_id,code));
+CREATE UNIQUE INDEX IF NOT EXISTS ix_point_active_code ON reception_points(code COLLATE NOCASE) WHERE active=1;
 CREATE TABLE IF NOT EXISTS qr_tokens(token TEXT PRIMARY KEY,reception_point_id TEXT,active INTEGER DEFAULT 1,expires_at INTEGER,created_at INTEGER);
 CREATE TABLE IF NOT EXISTS categories(id TEXT PRIMARY KEY,establishment_id TEXT,name TEXT,sort INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS products(id TEXT PRIMARY KEY,establishment_id TEXT,category_id TEXT,name TEXT,description TEXT,price INTEGER NOT NULL,image TEXT,aliases TEXT DEFAULT '',available INTEGER DEFAULT 1,stock_tracking INTEGER DEFAULT 0,status TEXT DEFAULT 'ACTIVE',created_at INTEGER,updated_at INTEGER);

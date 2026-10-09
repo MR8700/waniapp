@@ -258,32 +258,114 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
   on('GET', '/establishments/:id/points', true, c => {
     return q('SELECT p.id,p.code,p.label,p.active,z.name zone,t.token FROM reception_points p JOIN zones z ON z.id=p.zone_id LEFT JOIN qr_tokens t ON t.reception_point_id=p.id AND t.active=1 WHERE p.establishment_id=? ORDER BY p.code', c.params.id);
   });
+  function checkCodeGlobal(code, estId = null) {
+    const raw = String(code || '').trim().toUpperCase();
+    if (!raw) return { available: false, reason: 'CODE_EMPTY', message: 'Le code ne peut pas être vide.' };
+    const existing = one(`
+      SELECT p.id, p.establishment_id, p.active, e.name est_name, e.status est_status
+      FROM reception_points p
+      JOIN establishments e ON e.id = p.establishment_id
+      WHERE UPPER(p.code) = ?
+    `, raw);
+
+    if (!existing) {
+      return { available: true };
+    }
+
+    if (estId && existing.establishment_id === estId) {
+      if (!existing.active) {
+        return { available: true, reactivate: true, id: existing.id, message: `Ce code "${raw}" sera réactivé pour votre établissement.` };
+      }
+      return { available: false, reason: 'SAME_EST_EXISTS', message: `Le code "${raw}" existe déjà dans votre établissement.` };
+    }
+
+    return {
+      available: false,
+      reason: 'OTHER_EST_EXISTS',
+      message: `Le code "${raw}" est déjà utilisé par l'établissement "${existing.est_name}". Veuillez choisir un code différent (ex: M505) pour éviter toute confusion.`
+    };
+  }
+
+  on('GET', '/reception-points/check-code', false, c => {
+    const code = c.query.get('code');
+    const estId = c.query.get('est_id');
+    return checkCodeGlobal(code, estId);
+  });
+
   function generatePointCode(estId, label = '') {
-    let prefix = 'T';
-    const match = String(label || '').trim().match(/^(table|terrasse|salon|vip|paillote|bar|comptoir|chambre)\s*(\d+)?/i);
-    if (match) {
-      const word = match[1].toUpperCase();
-      if (word.startsWith('TER')) prefix = 'TER';
-      else if (word.startsWith('SAL')) prefix = 'SAL';
-      else if (word.startsWith('PAIL')) prefix = 'P';
-      else if (word.startsWith('VIP')) prefix = 'VIP';
-      else if (word.startsWith('BAR') || word.startsWith('COMP')) prefix = 'BAR';
-      else if (word.startsWith('CHAM')) prefix = 'CH';
-      else prefix = 'T';
-      if (match[2]) {
-        const candidate = `${prefix}${String(match[2]).padStart(2, '0')}`;
-        if (!one('SELECT 1 FROM reception_points WHERE establishment_id=? AND UPPER(code)=?', estId, candidate)) {
-          return candidate;
-        }
+    const est = one('SELECT name FROM establishments WHERE id=?', estId);
+    const estName = est ? est.name : '';
+
+    // Déterminer le préfixe propre à l'établissement pour éviter toute collision
+    const existingPoints = q('SELECT code FROM reception_points WHERE establishment_id=? AND active=1', estId);
+    let estPfx = null;
+    for (const ep of existingPoints) {
+      const m = (ep.code || '').match(/^[A-Z]+/);
+      if (m && m[0].length <= 3) { estPfx = m[0]; break; }
+    }
+
+    if (!estPfx && estName) {
+      const clean = estName.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase();
+      const words = clean.replace(/[^A-Z0-9\s]/g, ' ').split(/\s+/).filter(Boolean);
+      const stopWords = ['LE', 'LA', 'LES', 'DU', 'DE', 'DES', 'AU', 'AUX', 'UN', 'UNE', 'ET', 'EN', 'D', 'CHEZ'];
+      const filtered = words.filter(w => !stopWords.includes(w));
+      const target = filtered.length ? filtered : words;
+      if (target.length) estPfx = target[0][0];
+    }
+
+    let typePfx = 'T';
+    const typeMatch = String(label || '').trim().match(/^(table|terrasse|salon|vip|paillote|bar|comptoir|chambre)\s*(\d+)?/i);
+    if (typeMatch) {
+      const word = typeMatch[1].toUpperCase();
+      if (word.startsWith('TER')) typePfx = 'TER';
+      else if (word.startsWith('SAL')) typePfx = 'SAL';
+      else if (word.startsWith('PAIL')) typePfx = 'P';
+      else if (word.startsWith('VIP')) typePfx = 'VIP';
+      else if (word.startsWith('BAR') || word.startsWith('COMP')) typePfx = 'BAR';
+      else if (word.startsWith('CHAM')) typePfx = 'CH';
+      else typePfx = 'T';
+    }
+
+    const numMatches = String(label || '').match(/\d+/g);
+    const targetNum = numMatches ? parseInt(numMatches[numMatches.length - 1], 10) : null;
+
+    const candidatePrefixes = [typePfx, estPfx].filter(Boolean);
+    if (estName) {
+      const cleanWords = estName.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toUpperCase().replace(/[^A-Z0-9\s]/g, ' ').split(/\s+/).filter(w => w.length > 1);
+      if (cleanWords.length >= 2) {
+        candidatePrefixes.push(`${cleanWords[0][0]}${cleanWords[1][0]}`);
       }
     }
-    for (let i = 1; i <= 99; i++) {
-      const candidate = `${prefix}${String(i).padStart(2, '0')}`;
-      if (!one('SELECT 1 FROM reception_points WHERE establishment_id=? AND UPPER(code)=?', estId, candidate)) {
-        return candidate;
+    candidatePrefixes.push('P', 'M', 'T');
+    const prefixes = [...new Set(candidatePrefixes)];
+
+    // Si le libellé contient un numéro (ex: Table 99 -> T99, Salle 1 Table 500 -> T500 / M505)
+    if (targetNum !== null) {
+      for (const pfx of prefixes) {
+        const c1 = `${pfx}${targetNum >= 100 ? targetNum : String(targetNum).padStart(2, '0')}`;
+        if (checkCodeGlobal(c1, estId).available) return c1;
+        const c2 = `${pfx}${targetNum}`;
+        if (checkCodeGlobal(c2, estId).available) return c2;
       }
     }
-    return 'P' + rand(4).toUpperCase();
+
+    // Tester numérotation séquentielle 01..99
+    for (const pfx of prefixes) {
+      for (let i = 1; i <= 99; i++) {
+        const c = `${pfx}${String(i).padStart(2, '0')}`;
+        if (checkCodeGlobal(c, estId).available) return c;
+      }
+    }
+
+    // Tester numérotation 500..599 (comme T500, M505)
+    for (const pfx of prefixes) {
+      for (let i = 500; i <= 599; i++) {
+        const c = `${pfx}${i}`;
+        if (checkCodeGlobal(c, estId).available) return c;
+      }
+    }
+
+    return (prefixes[0] || 'P') + rand(3).toUpperCase();
   }
 
   on('POST', '/establishments/:id/points', true, c => {
@@ -305,17 +387,18 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
       code = generatePointCode(c.params.id, label);
     }
 
-    const existing = one('SELECT id,active FROM reception_points WHERE establishment_id=? AND UPPER(code)=?', c.params.id, code);
-    if (existing) {
-      if (!existing.active) {
-        run('UPDATE reception_points SET label=?,zone_id=?,active=1 WHERE id=?', label, zone.id, existing.id);
-        const token = rand(16);
-        run('UPDATE qr_tokens SET active=0 WHERE reception_point_id=?', existing.id);
-        run('INSERT INTO qr_tokens VALUES(?,?,1,NULL,?)', token, existing.id, now());
-        audit(c, 'POINT_REACTIVATED', 'reception_point', existing.id, { code, label });
-        return { status: 201, body: { id: existing.id, code, label, token, zone_id: zone.id } };
-      }
-      throw new E(409, 'POINT_CODE_EXISTS');
+    const check = checkCodeGlobal(code, c.params.id);
+    if (!check.available) {
+      throw new E(409, 'POINT_CODE_EXISTS', check.message);
+    }
+
+    if (check.reactivate) {
+      run('UPDATE reception_points SET label=?,zone_id=?,active=1 WHERE id=?', label, zone.id, check.id);
+      const token = rand(16);
+      run('UPDATE qr_tokens SET active=0 WHERE reception_point_id=?', check.id);
+      run('INSERT INTO qr_tokens VALUES(?,?,1,NULL,?)', token, check.id, now());
+      audit(c, 'POINT_REACTIVATED', 'reception_point', check.id, { code, label });
+      return { status: 201, body: { id: check.id, code, label, token, zone_id: zone.id } };
     }
 
     const id = uid(), token = rand(16);
@@ -341,30 +424,34 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
       return { establishment: { id: e.id, name: e.name }, zone: p.zone_name, point: { id: p.id, code: p.code, label: p.label }, token: t.token };
     }
 
-    // 2. Recherche par code court (ex: J04, T01, VIP1)
+    // 2. Recherche par code court (ex: M505, T500, J04)
     const upper = rawVal.toUpperCase();
-    const pts = q('SELECT p.*,z.name zone_name,t.token FROM reception_points p JOIN zones z ON z.id=p.zone_id LEFT JOIN qr_tokens t ON t.reception_point_id=p.id AND t.active=1 WHERE UPPER(p.code)=? AND p.active=1', upper);
-    if (pts.length) {
-      const activeEsts = pts.map(p => {
-        const e = one("SELECT id,name,status FROM establishments WHERE id=?", p.establishment_id);
-        return { p, e };
-      });
-      const disabled = activeEsts.find(item => item.e && item.e.status !== 'ACTIVE');
-      if (disabled && activeEsts.length === 1) {
-        throw new E(404, 'ESTABLISHMENT_UNAVAILABLE');
-      }
-      const match = activeEsts.find(item => item.e && item.e.status === 'ACTIVE');
-      if (match) {
-        return {
-          establishment: { id: match.e.id, name: match.e.name },
-          zone: match.p.zone_name,
-          point: { id: match.p.id, code: match.p.code, label: match.p.label },
-          token: match.p.token
-        };
-      }
+    const pts = q(`
+      SELECT p.*, z.name zone_name, t.token, e.id est_id, e.name est_name, e.status est_status
+      FROM reception_points p
+      JOIN establishments e ON e.id = p.establishment_id
+      JOIN zones z ON z.id = p.zone_id
+      LEFT JOIN qr_tokens t ON t.reception_point_id = p.id AND t.active = 1
+      WHERE UPPER(p.code) = ? AND p.active = 1
+    `, upper);
+
+    if (!pts.length) {
+      throw new E(404, 'QR_INVALID');
     }
 
-    throw new E(404, 'QR_INVALID');
+    const activeMatches = pts.filter(m => m.est_status === 'ACTIVE');
+    if (!activeMatches.length) {
+      throw new E(404, 'ESTABLISHMENT_UNAVAILABLE');
+    }
+
+    // Unicité globale garantie : un seul établissement actif correspond au code
+    const match = activeMatches[0];
+    return {
+      establishment: { id: match.est_id, name: match.est_name },
+      zone: match.zone_name,
+      point: { id: match.id, code: match.code, label: match.label },
+      token: match.token
+    };
   }
   on('GET', '/qr/:token', false, c => { limit(c, 'qr', 60, 60e3); return resolveQr(c.params.token); });
   on('GET', '/establishments/:id/qr', true, c => { need(c, c.params.id, 'MANAGER'); return q('SELECT t.token,t.active,p.id point_id,p.code,p.label,z.name zone FROM qr_tokens t JOIN reception_points p ON p.id=t.reception_point_id JOIN zones z ON z.id=p.zone_id WHERE p.establishment_id=?', c.params.id); });
@@ -386,11 +473,22 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
   on('POST', '/establishments/:id/zones', true, c => { need(c, c.params.id, 'MANAGER'); const id = uid(); run('INSERT INTO zones VALUES(?,?,?,?)', id, c.params.id, String(c.body.name).trim().slice(0, 40), Number(c.body.sort) || 0); return { status: 201, body: { id } }; });
   on('POST', '/zones/:id/points', true, c => {
     const z = one('SELECT * FROM zones WHERE id=?', c.params.id); if (!z) throw new E(404, 'NOT_FOUND'); need(c, z.establishment_id, 'MANAGER');
+    let code = String(c.body.code || '').trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 15);
+    const label = String(c.body.label || code || 'Table').trim().slice(0, 40);
+    if (!code) code = generatePointCode(z.establishment_id, label);
+    const check = checkCodeGlobal(code, z.establishment_id);
+    if (!check.available) throw new E(409, 'POINT_CODE_EXISTS', check.message);
+    if (check.reactivate) {
+      run('UPDATE reception_points SET label=?,zone_id=?,active=1 WHERE id=?', label, z.id, check.id);
+      const token = rand(16);
+      run('UPDATE qr_tokens SET active=0 WHERE reception_point_id=?', check.id);
+      run('INSERT INTO qr_tokens VALUES(?,?,1,NULL,?)', token, check.id, now());
+      return { status: 201, body: { id: check.id, token, code } };
+    }
     const id = uid(), token = rand(16);
-    const code = String(c.body.code || '').trim().toUpperCase().slice(0, 15);
-    if (!code) throw new E(400, 'BAD_REQUEST');
-    run('INSERT INTO reception_points VALUES(?,?,?,?,?,1)', id, z.establishment_id, z.id, code, String(c.body.label || code).trim().slice(0, 40));
-    run('INSERT INTO qr_tokens VALUES(?,?,1,NULL,?)', token, id, now()); return { status: 201, body: { id, token } };
+    run('INSERT INTO reception_points VALUES(?,?,?,?,?,1)', id, z.establishment_id, z.id, code, label);
+    run('INSERT INTO qr_tokens VALUES(?,?,1,NULL,?)', token, id, now());
+    return { status: 201, body: { id, token, code } };
   });
   on('POST', '/establishments/:id/invites', true, c => { need(c, c.params.id, 'MANAGER'); const role = c.body.role === 'MANAGER' ? 'MANAGER' : 'STAFF'; const code = mkInvite({ kind: 'ROLE', est: c.params.id, role, ttl: 86400e3 }); audit(c, 'EMPLOYEE_INVITED', 'establishment', c.params.id, { role }); return { status: 201, body: { code, role } }; });
   on('POST', '/invites/redeem', true, c => {

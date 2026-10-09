@@ -194,3 +194,75 @@ test('points: résolution par code court et unicité dans établissement', async
   e.close();
 });
 
+test('points: unicité globale inter-établissements (ex: E1=T500, E2=M505) et routage produits', async () => {
+  const { e, tok } = await setup();
+
+  // Établissement E1 crée un point "Salle1 Table 1" avec le code "T500"
+  const ptE1 = await e.call('POST', `/establishments/${e.seed.est}/points`, {
+    label: 'Salle1 Table 1',
+    code: 'T500'
+  }, tok.m);
+  assert.equal(ptE1.status, 201);
+  assert.equal(ptE1.body.code, 'T500');
+
+  // Gérant 2 crée un second établissement E2 "Maquis Le Régal"
+  const dev2 = await newDevice(e, { name: 'Gérant E2' });
+  const tok2 = await dev2.token();
+  const est2Res = await e.call('POST', '/establishments', { name: 'Maquis Le Régal' }, tok2);
+  assert.equal(est2Res.status, 201);
+  const est2Id = est2Res.body.id;
+
+  // Création d'un produit spécifique à E2
+  const prodE2 = await e.call('POST', '/products', {
+    establishment_id: est2Id,
+    name: 'Poisson braisé spécial E2',
+    price: 3000
+  }, tok2);
+  assert.equal(prodE2.status, 201);
+
+  // Tentative dans E2 d'utiliser le même code "T500" déjà pris par E1 -> Rejet 409
+  const dupOtherEst = await e.call('POST', `/establishments/${est2Id}/points`, {
+    label: 'Salle1 Table 1',
+    code: 'T500'
+  }, tok2);
+  assert.equal(dupOtherEst.status, 409);
+  assert.ok(dupOtherEst.body.message.includes('déjà utilisé par l\'établissement'));
+
+  // E2 définit son propre code "M505" pour "Salle1 Table 1" -> Succès
+  const ptE2 = await e.call('POST', `/establishments/${est2Id}/points`, {
+    label: 'Salle1 Table 1',
+    code: 'M505'
+  }, tok2);
+  assert.equal(ptE2.status, 201);
+  assert.equal(ptE2.body.code, 'M505');
+
+  // Client saisit M505 -> Résolution vers E2
+  const resE2 = await e.call('GET', '/qr/M505');
+  assert.equal(resE2.status, 200);
+  assert.equal(resE2.body.establishment.id, est2Id);
+  assert.equal(resE2.body.establishment.name, 'Maquis Le Régal');
+  assert.equal(resE2.body.point.code, 'M505');
+
+  // Les produits de E2 sont bien ceux renvoyés pour cette commande
+  const prodsE2 = await e.call('GET', `/products?establishment_id=${resE2.body.establishment.id}`, null, tok.c);
+  assert.equal(prodsE2.status, 200);
+  assert.equal(prodsE2.body.length, 1);
+  assert.equal(prodsE2.body[0].name, 'Poisson braisé spécial E2');
+
+  // Client saisit T500 -> Résolution vers E1
+  const resE1 = await e.call('GET', '/qr/T500');
+  assert.equal(resE1.status, 200);
+  assert.equal(resE1.body.establishment.id, e.seed.est);
+  assert.equal(resE1.body.point.code, 'T500');
+
+  // Vérification via le endpoint check-code
+  const checkTaken = await e.call('GET', `/reception-points/check-code?code=T500&est_id=${est2Id}`);
+  assert.equal(checkTaken.body.available, false);
+
+  const checkFree = await e.call('GET', `/reception-points/check-code?code=M999&est_id=${est2Id}`);
+  assert.equal(checkFree.body.available, true);
+
+  e.close();
+});
+
+
