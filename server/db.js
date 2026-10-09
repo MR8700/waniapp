@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,user_id TEXT,device_id T
 CREATE INDEX IF NOT EXISTS ix_sess_dev ON sessions(device_id);
 CREATE TABLE IF NOT EXISTS invites(code_hash TEXT PRIMARY KEY,kind TEXT,user_id TEXT,establishment_id TEXT,role TEXT,expires_at INTEGER,uses_left INTEGER);
 CREATE TABLE IF NOT EXISTS recovery_requests(id TEXT PRIMARY KEY,public_key TEXT,device_name TEXT,platform TEXT,claimed_name TEXT,status TEXT DEFAULT 'PENDING',user_id TEXT,device_id TEXT,decided_by TEXT,created_at INTEGER);
-CREATE TABLE IF NOT EXISTS establishments(id TEXT PRIMARY KEY,name TEXT,status TEXT DEFAULT 'ACTIVE',created_at INTEGER);
+CREATE TABLE IF NOT EXISTS establishments(id TEXT PRIMARY KEY,name TEXT,status TEXT DEFAULT 'ACTIVE',logo TEXT,created_at INTEGER);
 CREATE TABLE IF NOT EXISTS establishment_members(user_id TEXT,establishment_id TEXT,role TEXT NOT NULL,PRIMARY KEY(user_id,establishment_id));
 CREATE TABLE IF NOT EXISTS zones(id TEXT PRIMARY KEY,establishment_id TEXT,name TEXT,sort INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS reception_points(id TEXT PRIMARY KEY,establishment_id TEXT,zone_id TEXT,code TEXT,label TEXT,active INTEGER DEFAULT 1,UNIQUE(establishment_id,code));
@@ -45,6 +45,7 @@ export function openDb(path = ':memory:') {
   db.exec('PRAGMA foreign_keys=ON;');
   if (path !== ':memory:') db.exec('PRAGMA journal_mode=WAL;');
   db.exec(SCHEMA);
+  try { db.exec('ALTER TABLE establishments ADD COLUMN logo TEXT;'); } catch {}
   return db;
 }
 

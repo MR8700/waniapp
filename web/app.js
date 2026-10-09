@@ -222,7 +222,11 @@ function shell(title, body, active = '') {
     <header class="app-header">
       <div class="row" style="width:100%;justify-content:space-between;align-items:center">
         <div class="row" style="gap:8px;align-items:center">
-          <div style="width:34px;height:34px;border-radius:10px;background:var(--p);color:#fff;display:grid;place-items:center;font-weight:900;font-family:var(--hd);font-size:1.1rem">W</div>
+          ${S.ctx?.establishment?.logo ? `
+            <img src="${esc(S.ctx.establishment.logo)}" alt="Logo" style="width:34px;height:34px;border-radius:10px;object-fit:cover;border:1px solid #fed7aa">
+          ` : `
+            <div style="width:34px;height:34px;border-radius:10px;background:var(--p);color:#fff;display:grid;place-items:center;font-weight:900;font-family:var(--hd);font-size:1.1rem">${esc((S.ctx?.establishment?.name || 'W').trim()[0].toUpperCase())}</div>
+          `}
           <b class="hd" style="font-size:1.15rem">${esc(title)}</b>
         </div>
         <div class="row" style="gap:6px;align-items:center">

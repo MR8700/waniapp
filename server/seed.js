@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 
 export function seed(db, now = Date.now()) {
   const est = uid(), r = (sql, ...a) => db.prepare(sql).run(...a);
-  r('INSERT INTO establishments VALUES(?,?,?,?)', est, 'WANI — Bar, Grillades & Buvette', 'ACTIVE', now);
+  r('INSERT INTO establishments VALUES(?,?,?,?,?)', est, 'WANI — Bar, Grillades & Buvette', 'ACTIVE', null, now);
   const zones = { 'Jardin Paillote': ['J01', 'J02', 'J04'], 'Salle climatisée': ['S01', 'S02'], 'Salon VIP': ['VIP01', 'VIP02'] }, tokens = {};
   let s = 0;
   for (const [name, codes] of Object.entries(zones)) {

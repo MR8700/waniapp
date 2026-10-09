@@ -108,7 +108,7 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
         if (!inv) throw new E(400, 'INVALID_INVITE');
         run('UPDATE invites SET uses_left=uses_left-1 WHERE code_hash=?', inv.code_hash);
       }
-      if (inv?.kind === 'DEVICE') user_id = inv.user_id;
+      if (inv?.kind === 'DEVICE' || inv?.kind === 'BACKUP') user_id = inv.user_id;
       else {
         user_id = uid(); run('INSERT INTO users VALUES(?,?,0,?,?)', user_id, String(b.display_name || 'Client').trim().slice(0, 60), 'ACTIVE', now());
         if (inv?.kind === 'ROLE') run('INSERT INTO establishment_members VALUES(?,?,?)', user_id, inv.establishment_id, inv.role);
@@ -203,10 +203,30 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
     display_name: c.user.display_name,
     is_admin: !!c.user.is_admin,
     device_id: c.device.id,
-    memberships: q('SELECT m.establishment_id,m.role,e.name FROM establishment_members m JOIN establishments e ON e.id=m.establishment_id WHERE m.user_id=?', c.user.id)
+    memberships: q('SELECT m.establishment_id,m.role,e.name,e.logo,e.status FROM establishment_members m JOIN establishments e ON e.id=m.establishment_id WHERE m.user_id=?', c.user.id)
   }));
   on('GET', '/me/devices', true, c => q('SELECT id,device_name,platform,status,created_at,last_seen_at,revoked_at FROM devices WHERE user_id=? ORDER BY created_at', c.user.id).map(d => ({ ...d, current: d.id === c.device.id })));
-  on('POST', '/me/devices', true, c => { const code = mkInvite({ kind: 'DEVICE', user_id: c.user.id }); audit(c, 'DEVICE_PAIRING_CODE_CREATED', 'user', c.user.id); return { status: 201, body: { code, expires_in: 300 } }; });
+  on('POST', '/me/devices', true, c => {
+    const ttl = Number(c.body?.ttl) || 300e3;
+    const code = mkInvite({ kind: 'DEVICE', user_id: c.user.id, ttl });
+    audit(c, 'DEVICE_PAIRING_CODE_CREATED', 'user', c.user.id);
+    return { status: 201, body: { code, expires_in: Math.round(ttl / 1000) } };
+  });
+  on('POST', '/me/backup-codes', true, c => {
+    run("DELETE FROM invites WHERE kind='BACKUP' AND user_id=?", c.user.id);
+    const codes = [];
+    for (let i = 0; i < 5; i++) {
+      const code = `WANI-${randomBytes(2).toString('hex').toUpperCase()}-${randomBytes(2).toString('hex').toUpperCase()}`;
+      run('INSERT INTO invites VALUES(?,?,?,NULL,NULL,?,1)', sha(code), 'BACKUP', c.user.id, now() + 365 * 86400e3);
+      codes.push(code);
+    }
+    audit(c, 'BACKUP_CODES_GENERATED', 'user', c.user.id);
+    return { codes };
+  });
+  on('GET', '/me/backup-codes', true, c => {
+    const count = one("SELECT COUNT(*) n FROM invites WHERE kind='BACKUP' AND user_id=? AND uses_left>0 AND expires_at>?", c.user.id, now()).n;
+    return { active_count: count };
+  });
   const delDev = c => {
     const d = one('SELECT * FROM devices WHERE id=? AND user_id=?', c.params.id, c.user.id);
     if (!d) throw new E(404, 'NOT_FOUND');
@@ -218,10 +238,10 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
   on('PATCH', '/me', true, c => { run('UPDATE users SET display_name=? WHERE id=?', String(c.body.display_name || '').slice(0, 60), c.user.id); return { ok: true }; });
 
   // ÉTABLISSEMENTS / ZONES / POINTS / QR
-  const estOk = id => { const e = one("SELECT * FROM establishments WHERE id=? AND status='ACTIVE'", id); if (!e) throw new E(404, 'ESTABLISHMENT_UNAVAILABLE'); return e; };
-  on('GET', '/establishments', true, () => q("SELECT id,name FROM establishments WHERE status='ACTIVE'"));
+  const estOk = id => { const e = one("SELECT id,name,status,logo FROM establishments WHERE id=? AND status='ACTIVE'", id); if (!e) throw new E(404, 'ESTABLISHMENT_UNAVAILABLE'); return e; };
+  on('GET', '/establishments', true, () => q("SELECT id,name,logo FROM establishments WHERE status='ACTIVE'"));
   on('GET', '/establishments/public', false, () => {
-    return q("SELECT id,name,status FROM establishments WHERE status='ACTIVE'").map(e => ({
+    return q("SELECT id,name,status,logo FROM establishments WHERE status='ACTIVE'").map(e => ({
       ...e,
       points: q("SELECT p.id,p.code,p.label,z.name zone FROM reception_points p JOIN zones z ON z.id=p.zone_id WHERE p.establishment_id=? AND p.active=1 ORDER BY p.code", e.id)
     }));
@@ -229,13 +249,14 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
   on('POST', '/establishments', true, c => {
     const name = String(c.body.name || '').trim().slice(0, 80);
     if (!name) throw new E(400, 'NAME_REQUIRED');
+    const logo = c.body.logo ? String(c.body.logo).trim() : null;
     const id = uid();
-    run('INSERT INTO establishments VALUES(?,?,?,?)', id, name, 'ACTIVE', now());
+    run('INSERT INTO establishments VALUES(?,?,?,?,?)', id, name, 'ACTIVE', logo, now());
     run('INSERT INTO establishment_members VALUES(?,?,?)', c.user.id, id, 'MANAGER');
     const zid = uid();
     run('INSERT INTO zones VALUES(?,?,?,?)', zid, id, 'Salle & Terrasse', 0);
     audit(c, 'ESTABLISHMENT_CREATED', 'establishment', id, { name });
-    return { status: 201, body: { id, name, default_zone_id: zid } };
+    return { status: 201, body: { id, name, logo, default_zone_id: zid } };
   });
   on('POST', '/establishments/:id/claim', true, c => {
     const e = estOk(c.params.id);
@@ -243,16 +264,18 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
     if (hasManager) throw new E(403, 'ESTABLISHMENT_ALREADY_CLAIMED');
     run('INSERT INTO establishment_members VALUES(?,?,?)', c.user.id, e.id, 'MANAGER');
     audit(c, 'ESTABLISHMENT_CLAIMED', 'establishment', e.id);
-    return { status: 200, body: { ok: true, id: e.id, name: e.name, role: 'MANAGER' } };
+    return { status: 200, body: { ok: true, id: e.id, name: e.name, logo: e.logo, role: 'MANAGER' } };
   });
   on('PATCH', '/establishments/:id', true, c => {
     need(c, c.params.id, 'MANAGER');
     const e = one('SELECT * FROM establishments WHERE id=?', c.params.id);
     if (!e) throw new E(404, 'NOT_FOUND');
-    const name = c.body.name ? String(c.body.name).trim().slice(0, 80) : e.name;
+    const name = c.body.name !== undefined ? String(c.body.name).trim().slice(0, 80) : e.name;
     const status = c.body.status && ['ACTIVE', 'PAUSED'].includes(c.body.status) ? c.body.status : e.status;
-    run('UPDATE establishments SET name=?,status=? WHERE id=?', name, status, e.id);
-    return { ok: true, id: e.id, name, status };
+    const logo = c.body.logo !== undefined ? (c.body.logo ? String(c.body.logo).trim() : null) : (e.logo || null);
+    run('UPDATE establishments SET name=?,status=?,logo=? WHERE id=?', name, status, logo, e.id);
+    audit(c, 'ESTABLISHMENT_UPDATED', 'establishment', e.id, { name, status, has_logo: !!logo });
+    return { ok: true, id: e.id, name, status, logo };
   });
   on('GET', '/establishments/:id', true, c => estOk(c.params.id));
   on('GET', '/establishments/:id/points', true, c => {
@@ -419,15 +442,15 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
       if (!t.active || (t.expires_at && t.expires_at < now())) throw new E(404, 'QR_INVALID');
       const p = one('SELECT p.*,z.name zone_name FROM reception_points p JOIN zones z ON z.id=p.zone_id WHERE p.id=? AND p.active=1', t.reception_point_id);
       if (!p) throw new E(404, 'QR_INVALID');
-      const e = one("SELECT id,name,status FROM establishments WHERE id=?", p.establishment_id);
+      const e = one("SELECT id,name,status,logo FROM establishments WHERE id=?", p.establishment_id);
       if (!e || e.status !== 'ACTIVE') throw new E(404, 'ESTABLISHMENT_UNAVAILABLE');
-      return { establishment: { id: e.id, name: e.name }, zone: p.zone_name, point: { id: p.id, code: p.code, label: p.label }, token: t.token };
+      return { establishment: { id: e.id, name: e.name, logo: e.logo }, zone: p.zone_name, point: { id: p.id, code: p.code, label: p.label }, token: t.token };
     }
 
     // 2. Recherche par code court (ex: M505, T500, J04)
     const upper = rawVal.toUpperCase();
     const pts = q(`
-      SELECT p.*, z.name zone_name, t.token, e.id est_id, e.name est_name, e.status est_status
+      SELECT p.*, z.name zone_name, t.token, e.id est_id, e.name est_name, e.logo est_logo, e.status est_status
       FROM reception_points p
       JOIN establishments e ON e.id = p.establishment_id
       JOIN zones z ON z.id = p.zone_id
@@ -447,7 +470,7 @@ export function createApp({ db, secret, now = () => Date.now(), dataDir = './dat
     // Unicité globale garantie : un seul établissement actif correspond au code
     const match = activeMatches[0];
     return {
-      establishment: { id: match.est_id, name: match.est_name },
+      establishment: { id: match.est_id, name: match.est_name, logo: match.est_logo },
       zone: match.zone_name,
       point: { id: match.id, code: match.code, label: match.label },
       token: match.token

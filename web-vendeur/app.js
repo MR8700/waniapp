@@ -73,6 +73,152 @@ async function triggerInstall() {
 }
 
 // ==========================================
+// UTILITAIRES : COPIE, PARTAGE, TÉLÉCHARGEMENT & BIOMÉTRIE
+// ==========================================
+function copyText(text, successMsg = 'Copié dans le presse-papier !') {
+  if (navigator.clipboard?.writeText) {
+    navigator.clipboard.writeText(text).then(() => toast(successMsg, 'ok')).catch(() => fallbackCopy(text, successMsg));
+  } else {
+    fallbackCopy(text, successMsg);
+  }
+}
+
+function fallbackCopy(text, successMsg) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.position = 'fixed';
+  ta.style.opacity = '0';
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    document.execCommand('copy');
+    toast(successMsg, 'ok');
+  } catch {
+    prompt('Copiez le texte ci-dessous :', text);
+  }
+  ta.remove();
+}
+
+async function shareText(title, text) {
+  if (navigator.share) {
+    try {
+      await navigator.share({ title, text });
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+    }
+  }
+  copyText(text, 'Copié dans le presse-papier pour le partage !');
+}
+
+function downloadFile(filename, content) {
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  toast('Fichier téléchargé avec succès !', 'ok');
+}
+
+function resizeImageToDataUrl(file, maxSize = 240) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let w = img.width, h = img.height;
+        if (w > h) {
+          if (w > maxSize) { h = Math.round((h * maxSize) / w); w = maxSize; }
+        } else {
+          if (h > maxSize) { w = Math.round((w * maxSize) / h); h = maxSize; }
+        }
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        resolve(canvas.toDataURL('image/jpeg', 0.82));
+      };
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+async function isBiometricAvailable() {
+  if (window.PublicKeyCredential &&
+      typeof window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function') {
+    try {
+      return await window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+    } catch {
+      return false;
+    }
+  }
+  return false;
+}
+
+async function enableBiometrics() {
+  if (!window.PublicKeyCredential) {
+    alert("La biométrie n'est pas prise en charge par ce navigateur.");
+    return false;
+  }
+  const avail = await isBiometricAvailable();
+  if (!avail) {
+    alert("Aucun capteur biométrique (Face ID, empreinte) n'est configuré ou disponible sur cet appareil.");
+    return false;
+  }
+  try {
+    const challenge = new Uint8Array(32);
+    crypto.getRandomValues(challenge);
+    const userId = new Uint8Array(16);
+    crypto.getRandomValues(userId);
+
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge,
+        rp: { name: 'WANI Vendeur' },
+        user: {
+          id: userId,
+          name: S.me?.display_name || 'Vendeur',
+          displayName: S.me?.display_name || 'Vendeur'
+        },
+        pubKeyCredParams: [
+          { type: 'public-key', alg: -7 },
+          { type: 'public-key', alg: -257 }
+        ],
+        authenticatorSelection: {
+          authenticatorAttachment: 'platform',
+          userVerification: 'required'
+        },
+        timeout: 60000
+      }
+    });
+    if (cred) {
+      localStorage.setItem('wani_bio_enabled', '1');
+      toast('Biométrie activée avec succès !', 'ok');
+      return true;
+    }
+  } catch (err) {
+    if (err.name !== 'NotAllowedError') {
+      alert("Activation biométrique impossible : " + (err.message || err));
+    }
+    return false;
+  }
+  return false;
+}
+
+function disableBiometrics() {
+  localStorage.removeItem('wani_bio_enabled');
+  toast('Biométrie désactivée.', 'info');
+}
+
+// ==========================================
 // CLIENT API & AUTHENTIFICATION
 // ==========================================
 async function raw(method, path, body = null, token = null) {
@@ -164,14 +310,14 @@ async function loadMe() {
   if (!S.tokens?.access) return;
   S.me = await api('GET', '/me');
   if (S.me?.memberships?.length) {
-    if (!S.currentEst || !S.me.memberships.find(m => m.establishment_id === S.currentEst.id)) {
-      S.currentEst = {
-        id: S.me.memberships[0].establishment_id,
-        name: S.me.memberships[0].name,
-        role: S.me.memberships[0].role
-      };
-      LS.set('current_est', S.currentEst);
-    }
+    const mem = S.me.memberships.find(m => S.currentEst && m.establishment_id === S.currentEst.id) || S.me.memberships[0];
+    S.currentEst = {
+      id: mem.establishment_id,
+      name: mem.name,
+      logo: mem.logo || null,
+      role: mem.role
+    };
+    LS.set('current_est', S.currentEst);
   }
 }
 
@@ -236,11 +382,15 @@ function shell(title, body, active = '') {
   app.innerHTML = `
     <header class="app-header" style="background:#042f2e;color:#fff;border-bottom-color:#115e59">
       <div class="row" style="width:100%;justify-content:space-between;align-items:center">
-        <div class="row" style="gap:8px;align-items:center">
-          <div style="width:32px;height:32px;border-radius:8px;background:#0d9488;color:#fff;display:grid;place-items:center;font-weight:900;font-family:var(--hd)">W</div>
-          <div>
-            <b class="hd" style="font-size:1.1rem;color:#fff">${esc(title)}</b>
-            <div style="font-size:0.75rem;color:#5eead4">${esc(S.currentEst?.name || 'Vendeur')}</div>
+        <div class="row" style="gap:8px;align-items:center;cursor:pointer" id="hdr-brand-click" title="Gérer l'établissement et les paramètres">
+          ${S.currentEst?.logo ? `
+            <img src="${esc(S.currentEst.logo)}" alt="Logo" style="width:34px;height:34px;border-radius:8px;object-fit:cover;border:1px solid #14b8a6">
+          ` : `
+            <div style="width:34px;height:34px;border-radius:8px;background:#0d9488;color:#fff;display:grid;place-items:center;font-weight:900;font-family:var(--hd);font-size:1.15rem">${esc((S.currentEst?.name || 'W').trim()[0].toUpperCase())}</div>
+          `}
+          <div style="max-width:160px">
+            <b class="hd" style="font-size:1.05rem;color:#fff;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(title)}</b>
+            <div style="font-size:0.75rem;color:#5eead4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(S.currentEst?.name || 'Vendeur')}</div>
           </div>
         </div>
         <div class="row" style="gap:6px">
@@ -268,11 +418,14 @@ function shell(title, body, active = '') {
         <span class="material-symbols-outlined">restaurant</span>Produits
       </a>
       <a href="#/stats" class="${active === 'stats' ? 'on' : ''}" style="color:${active === 'stats' ? '#2dd4bf' : '#99f6e4'}">
-        <span class="material-symbols-outlined">analytics</span>Bilan
+        <span class="material-symbols-outlined">settings</span>Bilan & Équipe
       </a>
     </nav>
   `;
 
+  $('#hdr-brand-click')?.addEventListener('click', () => {
+    location.hash = '#/stats';
+  });
   $('#hdr-install-btn')?.addEventListener('click', triggerInstall);
   $('#toggle-service-btn')?.addEventListener('click', () => {
     S.serviceOpen = !S.serviceOpen;
@@ -314,6 +467,15 @@ function welcome(err = '') {
         Connexion directe sans mot de passe. Gérez vos points de livraison, vos produits et recevez vos commandes en direct.
       </p>
 
+      ${(localStorage.getItem('wani_bio_enabled') === '1' && localStorage.getItem('device_id')) ? `
+        <div style="margin:0 auto 14px;max-width:360px">
+          <button class="big" id="v-bio-login-btn" style="background:#0f766e;width:100%;display:flex;align-items:center;justify-content:center;gap:8px">
+            <span class="material-symbols-outlined text-[24px]">fingerprint</span>
+            Déverrouiller avec la biométrie
+          </button>
+        </div>
+      ` : ''}
+
       <div style="margin:0 auto 16px;max-width:360px">
         <button class="big sm sec" id="v-install-btn" style="border:2px solid #0f766e;color:#0f766e;font-weight:800;display:inline-flex;align-items:center;justify-content:center;gap:8px;width:100%;background:#f0fdfa">
           <span class="material-symbols-outlined text-[20px]">install_mobile</span>
@@ -328,15 +490,15 @@ function welcome(err = '') {
         <!-- Bouton principal gérant (sans aucun code requis) -->
         <button class="big" id="v-start-btn" style="margin-top:12px;background:#0f766e">Accéder à mon espace vendeur</button>
 
-        <!-- Option équipe (serveurs avec code d'invitation) -->
+        <!-- Option équipe (serveurs avec code d'invitation, code secours ou association) -->
         <div style="margin-top:14px;padding-top:12px;border-top:1px dashed var(--bd)">
           <details id="v-invite-details" style="font-size:0.85rem">
-            <summary style="cursor:pointer;color:#0f766e;font-weight:700">👉 Vous êtes serveur avec un code d'équipe ?</summary>
+            <summary style="cursor:pointer;color:#0f766e;font-weight:700">👉 Vous avez un code d'invitation, d'association ou de secours ?</summary>
             <div style="margin-top:8px">
-              <label class="muted" style="font-weight:600;font-size:0.8rem">Code d'invitation (fourni par votre gérant) :</label>
-              <input id="v-code" placeholder="Ex: XXXXX-XXXXX" style="margin-top:4px;font-size:0.9rem">
+              <label class="muted" style="font-weight:600;font-size:0.8rem">Code secret (serveur, association ou secours) :</label>
+              <input id="v-code" placeholder="Ex: XXXXX-XXXXX ou WANI-XXXX-YYYY" style="margin-top:4px;font-size:0.9rem;text-transform:uppercase;font-family:monospace">
               <div style="font-size:0.75rem;color:#64748b;margin-top:4px">
-                💡 <em>Laissez vide si vous êtes le gérant ou créez votre lieu.</em>
+                💡 <em>Laissez vide si vous êtes le gérant sur votre appareil habituel.</em>
               </div>
             </div>
           </details>
@@ -350,6 +512,17 @@ function welcome(err = '') {
       </div>
     </main>
   `;
+
+  $('#v-bio-login-btn')?.addEventListener('click', async () => {
+    try {
+      toast('Vérification biométrique...', 'info');
+      await login();
+      location.hash = '#/orders';
+      route();
+    } catch (e) {
+      alert('Connexion biométrique : ' + (e.message || e));
+    }
+  });
 
   $('#v-install-btn')?.addEventListener('click', triggerInstall);
   $('#v-start-btn').onclick = async () => {
@@ -1029,7 +1202,7 @@ function showAddProdModal() {
 }
 
 // ==========================================
-// ÉCRAN 5 : BILAN DES VENTES & ÉQUIPE
+// ÉCRAN 5 : BILAN, ÉQUIPE & PARAMÈTRES ÉTABLISSEMENT
 // ==========================================
 async function statsView() {
   if (!S.currentEst) return;
@@ -1038,41 +1211,277 @@ async function statsView() {
     stats = await api('GET', `/statistics?establishment_id=${S.currentEst.id}`);
   } catch {}
 
+  const bioActive = localStorage.getItem('wani_bio_enabled') === '1';
+
   shell('Bilan & Équipe', `
-    <div class="card" style="text-align:center;padding:24px 16px;background:#ecfdf5;border-color:#6ee7b7">
+    <!-- 1. En-tête Établissement : Logo & Nom modifiables -->
+    <div class="card col" style="gap:14px;text-align:left">
+      <div class="row" style="justify-content:space-between;align-items:center">
+        <b style="font-size:1.15rem;color:var(--tx)">Votre Établissement</b>
+        <span class="pill" style="font-size:0.75rem">${S.currentEst?.role === 'MANAGER' ? 'Gérant' : 'Équipe'}</span>
+      </div>
+
+      <!-- Aperçu et modification du Logo -->
+      <div class="row" style="gap:14px;align-items:center;background:#f8fafc;padding:12px;border-radius:12px;border:1px solid #e2e8f0">
+        <div style="position:relative;width:68px;height:68px;border-radius:14px;background:#0d9488;display:grid;place-items:center;color:#fff;font-weight:900;font-size:2rem;overflow:hidden;border:2px solid #14b8a6;box-shadow:0 4px 10px rgba(13,148,136,0.15)">
+          ${S.currentEst?.logo ? `
+            <img src="${esc(S.currentEst.logo)}" alt="Logo" style="width:100%;height:100%;object-fit:cover">
+          ` : `
+            <span>${esc((S.currentEst?.name || 'W').trim()[0].toUpperCase())}</span>
+          `}
+        </div>
+
+        <div class="col" style="gap:6px;flex:1">
+          <div style="font-size:0.85rem;font-weight:700">Logo de l'établissement :</div>
+          <div class="row" style="gap:6px;flex-wrap:wrap">
+            <label class="btn sm" style="background:#0f766e;color:#fff;cursor:pointer;display:inline-flex;align-items:center;gap:4px">
+              <span class="material-symbols-outlined text-[16px]">add_photo_alternate</span>
+              Changer le logo
+              <input type="file" id="est-logo-file" accept="image/*" style="display:none">
+            </label>
+            ${S.currentEst?.logo ? `
+              <button class="sec sm" id="est-logo-del-btn" style="color:var(--er);border-color:#fecaca">
+                <span class="material-symbols-outlined text-[16px]">delete</span>
+                Enlever
+              </button>
+            ` : ''}
+          </div>
+          <div style="font-size:0.75rem;color:#64748b">Format photo/carré (PNG, JPG). Visible par tous vos clients.</div>
+        </div>
+      </div>
+
+      <!-- Modification du Nom de l'établissement -->
+      <div class="col" style="gap:6px">
+        <label class="muted" style="font-weight:700;font-size:0.85rem">Nom de l'établissement :</label>
+        <div class="row" style="gap:8px">
+          <input id="est-name-in" value="${esc(S.currentEst?.name || '')}" style="font-size:1rem;font-weight:700;flex:1" placeholder="Ex: Maquis Le Régal...">
+          <button class="ok" id="save-est-name-btn" style="background:#0f766e;white-space:nowrap;padding:0 16px">Enregistrer</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Recette Totale -->
+    <div class="card" style="text-align:center;padding:20px 16px;background:#ecfdf5;border-color:#6ee7b7">
       <span class="muted" style="font-size:0.85rem">Recette totale encaissée</span>
       <b style="font-size:2rem;color:#047857;display:block;margin-top:4px">${fcfa(stats.revenue_paid || 0)}</b>
     </div>
 
-    <div class="card col" style="gap:10px;margin-top:12px">
+    <!-- 3. Inviter un serveur / employé -->
+    <div class="card col" style="gap:10px">
       <b style="font-size:1.1rem">Inviter un serveur / employé</b>
       <p class="muted" style="margin:0;font-size:0.85rem">
         Générez un code temporaire pour permettre à un serveur ou caissier d'accéder au tableau de bord sans mot de passe.
       </p>
       <button class="big sm" id="gen-invite-btn" style="background:#0f766e">Générer un code serveur (24h)</button>
-      <div id="invite-box" style="display:none;padding:10px;background:#f8fafc;border-radius:8px;font-family:monospace;font-size:1.2rem;text-align:center;font-weight:900"></div>
+      <div id="invite-box" style="display:none;padding:12px;background:#f8fafc;border-radius:8px;border:1px solid #e2e8f0;text-align:center">
+        <div id="invite-code-txt" style="font-family:monospace;font-size:1.4rem;font-weight:900;letter-spacing:2px;color:#042f2e;margin-bottom:8px"></div>
+        <div class="row" style="gap:8px;justify-content:center">
+          <button class="sm sec" id="copy-invite-btn">📋 Copier le code</button>
+          <button class="sm ok" id="share-invite-btn" style="background:#0f766e">📲 Partager</button>
+        </div>
+      </div>
     </div>
 
+    <!-- 4. Sécurité, Biométrie, Appareils & Codes de secours -->
+    <div class="card col" style="gap:12px">
+      <b style="font-size:1.1rem;color:var(--tx)">Sécurité &amp; Accès sans mot de passe</b>
+
+      <!-- Biométrie -->
+      <div style="background:#f0fdfa;border:1px solid #ccfbf1;padding:12px;border-radius:10px">
+        <div class="row" style="justify-content:space-between;align-items:center">
+          <div style="font-weight:700;color:#0f766e;display:flex;align-items:center;gap:6px">
+            <span class="material-symbols-outlined text-[20px]">fingerprint</span>
+            Biométrie (Face ID / Empreinte)
+          </div>
+          ${bioActive ? `
+            <span class="badge g" style="font-size:0.75rem">Active</span>
+          ` : `
+            <span class="badge orange" style="font-size:0.75rem">Désactivée</span>
+          `}
+        </div>
+        <p class="muted" style="margin:6px 0 10px;font-size:0.8rem">
+          Déverrouillez rapidement l'espace vendeur avec l'empreinte digitale ou Face ID de cet appareil.
+        </p>
+        ${bioActive ? `
+          <button class="sm sec" id="toggle-bio-btn" style="color:var(--er);border-color:#fecaca">Désactiver la biométrie</button>
+        ` : `
+          <button class="sm ok" id="toggle-bio-btn" style="background:#0f766e">Activer la biométrie</button>
+        `}
+      </div>
+
+      <!-- Ajouter un autre appareil -->
+      <div style="background:#f8fafc;border:1px solid var(--bd);padding:12px;border-radius:10px">
+        <b style="display:block;font-size:0.95rem;margin-bottom:4px">📱 Ajouter un autre appareil (téléphone, tablette)</b>
+        <p class="muted" style="margin:0 0 10px;font-size:0.8rem">
+          Associez un autre appareil pour gérer vos commandes simultanément sans mot de passe.
+        </p>
+        <button class="sm sec" id="add-device-btn" style="border:1.5px solid #0f766e;color:#0f766e;font-weight:700">
+          + Associer un nouvel appareil
+        </button>
+        <div id="device-box" style="display:none;margin-top:10px;padding:12px;background:#fff;border-radius:8px;border:1px solid #e2e8f0;text-align:center">
+          <div style="font-size:0.75rem;color:#64748b;margin-bottom:4px">Code d'association (valable 24h) :</div>
+          <div id="device-code-txt" style="font-family:monospace;font-size:1.4rem;font-weight:900;letter-spacing:2px;color:#0f766e;margin-bottom:8px"></div>
+          <div class="row" style="gap:8px;justify-content:center">
+            <button class="sm sec" id="copy-device-btn">📋 Copier</button>
+            <button class="sm ok" id="share-device-btn" style="background:#0f766e">📲 Partager</button>
+          </div>
+          <div style="font-size:0.75rem;color:#64748b;margin-top:8px;line-height:1.3">
+            Sur votre autre appareil, ouvrez WANI Vendeur, touchez « Code d'invitation ou d'association » et entrez ce code.
+          </div>
+        </div>
+      </div>
+
+      <!-- Codes de secours -->
+      <div style="background:#fffbeb;border:1px solid #fef3c7;padding:12px;border-radius:10px">
+        <div style="display:flex;align-items:center;gap:6px;font-weight:700;color:#92400e;margin-bottom:4px">
+          <span class="material-symbols-outlined text-[20px]">shield</span>
+          Codes de secours (Récupération d'urgence)
+        </div>
+        <p class="muted" style="margin:0 0 10px;font-size:0.8rem;color:#78350f">
+          En cas de perte ou de panne de cet appareil, ces codes secrets vous permettent de récupérer immédiatement votre compte sans mot de passe.
+        </p>
+        <button class="sm sec" id="show-backup-btn" style="border:1.5px solid #d97706;color:#b45309;font-weight:700;background:#fff">
+          🛡️ Voir / Générer mes codes de secours
+        </button>
+
+        <div id="backup-box" style="display:none;margin-top:10px;padding:12px;background:#fff;border-radius:8px;border:1px solid #fde68a">
+          <div style="font-size:0.78rem;font-weight:700;color:#92400e;margin-bottom:8px">Vos 5 codes de secours secrets (usage unique, 1 an) :</div>
+          <div id="backup-list" style="display:grid;grid-template-columns:1fr;gap:6px;font-family:monospace;font-weight:800;font-size:1.05rem;color:#1e293b;padding:8px;background:#fefce8;border-radius:6px;margin-bottom:10px"></div>
+          <div class="row" style="gap:6px;flex-wrap:wrap;justify-content:center">
+            <button class="sm sec" id="copy-backup-btn">📋 Copier les codes</button>
+            <button class="sm sec" id="download-backup-btn" style="border-color:#d97706;color:#92400e">💾 Télécharger (.txt)</button>
+            <button class="sm ok" id="share-backup-btn" style="background:#0f766e">📲 Partager</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 5. Déconnexion -->
     <div class="card col" style="margin-top:12px">
       <b style="font-size:1.1rem">Déconnexion</b>
-      <button class="sec sm" id="v-logout-btn" style="color:var(--er);margin-top:8px">Se déconnecter de ce terminal</button>
+      <button class="sec sm" id="v-logout-btn" style="color:var(--er);margin-top:8px">Se déconnecter de cet appareil</button>
     </div>
   `, 'stats');
 
+  // Gérer l'upload du logo
+  $('#est-logo-file')?.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      toast('Traitement du logo...', 'info');
+      const dataUrl = await resizeImageToDataUrl(file, 240);
+      await api('PATCH', `/establishments/${S.currentEst.id}`, { logo: dataUrl });
+      S.currentEst.logo = dataUrl;
+      LS.set('current_est', S.currentEst);
+      toast('Logo mis à jour avec succès !', 'ok');
+      statsView();
+    } catch (err) {
+      alert('Erreur lors du changement de logo : ' + (err.message || err));
+    }
+  });
+
+  // Retirer le logo
+  $('#est-logo-del-btn')?.addEventListener('click', async () => {
+    if (confirm('Voulez-vous retirer le logo de votre établissement ?')) {
+      try {
+        await api('PATCH', `/establishments/${S.currentEst.id}`, { logo: null });
+        S.currentEst.logo = null;
+        LS.set('current_est', S.currentEst);
+        toast('Logo retiré.', 'info');
+        statsView();
+      } catch (err) {
+        alert('Erreur: ' + (err.message || err));
+      }
+    }
+  });
+
+  // Enregistrer le nom de l'établissement
+  $('#save-est-name-btn')?.addEventListener('click', async () => {
+    const name = ($('#est-name-in')?.value || '').trim();
+    if (!name) return alert("Veuillez renseigner le nom de l'établissement.");
+    try {
+      await api('PATCH', `/establishments/${S.currentEst.id}`, { name });
+      S.currentEst.name = name;
+      LS.set('current_est', S.currentEst);
+      toast("Nom de l'établissement mis à jour !", 'ok');
+      statsView();
+    } catch (err) {
+      alert('Erreur : ' + (err.message || err));
+    }
+  });
+
+  // Générer un code serveur
   $('#gen-invite-btn')?.addEventListener('click', async () => {
     try {
       const r = await api('POST', `/establishments/${S.currentEst.id}/invites`, { role: 'STAFF' });
       const b = $('#invite-box');
+      const txt = $('#invite-code-txt');
       b.style.display = 'block';
-      b.textContent = r.code;
-      toast('Code généré ! Donnez ce code au serveur.');
+      txt.textContent = r.code;
+      toast('Code serveur généré ! Donnez ce code au serveur.');
+      $('#copy-invite-btn').onclick = () => copyText(r.code, 'Code serveur copié !');
+      $('#share-invite-btn').onclick = () => shareText(`Code serveur ${S.currentEst.name}`, `Votre code d'accès serveur pour ${S.currentEst.name} : ${r.code}`);
     } catch (e) {
       alert('Erreur: ' + e.message);
     }
   });
 
+  // Activer / désactiver la biométrie
+  $('#toggle-bio-btn')?.addEventListener('click', async () => {
+    if (localStorage.getItem('wani_bio_enabled') === '1') {
+      disableBiometrics();
+      statsView();
+    } else {
+      const ok = await enableBiometrics();
+      if (ok) statsView();
+    }
+  });
+
+  // Ajouter un appareil
+  $('#add-device-btn')?.addEventListener('click', async () => {
+    try {
+      const r = await api('POST', '/me/devices', { ttl: 86400e3 });
+      const b = $('#device-box');
+      const txt = $('#device-code-txt');
+      b.style.display = 'block';
+      txt.textContent = r.code;
+      toast('Code d\'association créé (valable 24h) !');
+      $('#copy-device-btn').onclick = () => copyText(r.code, 'Code d\'association copié !');
+      $('#share-device-btn').onclick = () => shareText(`Associer un appareil à ${S.currentEst.name}`, `Code d'association pour ajouter votre appareil à ${S.currentEst.name} sur WANI : ${r.code}`);
+    } catch (e) {
+      alert('Erreur: ' + e.message);
+    }
+  });
+
+  // Codes de secours
+  $('#show-backup-btn')?.addEventListener('click', async () => {
+    try {
+      toast('Génération des codes de secours...', 'info');
+      const r = await api('POST', '/me/backup-codes');
+      const codes = r.codes || [];
+      const box = $('#backup-box');
+      const list = $('#backup-list');
+      box.style.display = 'block';
+      list.innerHTML = codes.map(c => `<div>🔑 ${esc(c)}</div>`).join('');
+
+      const content = `CODES DE SECOURS WANI - ${S.currentEst.name}\n` +
+        `Date : ${new Date().toLocaleDateString('fr-FR')}\n` +
+        `Utilisateur : ${S.me?.display_name || 'Gérant'}\n\n` +
+        `Conservez ces codes en lieu sûr. Chaque code permet de reconnecter votre compte sans mot de passe en cas de perte de votre appareil.\n\n` +
+        codes.map((c, i) => `${i + 1}. ${c}`).join('\n') + `\n`;
+
+      $('#copy-backup-btn').onclick = () => copyText(codes.join('\n'), 'Tous les codes de secours ont été copiés !');
+      $('#download-backup-btn').onclick = () => downloadFile('wani-codes-secours.txt', content);
+      $('#share-backup-btn').onclick = () => shareText(`Codes de secours WANI - ${S.currentEst.name}`, content);
+      toast('Codes de secours générés avec succès !', 'ok');
+    } catch (e) {
+      alert('Erreur lors de la génération des codes : ' + (e.message || e));
+    }
+  });
+
+  // Déconnexion de cet appareil
   $('#v-logout-btn')?.addEventListener('click', () => {
-    if (confirm('Voulez-vous vous déconnecter ?')) {
+    if (confirm('Voulez-vous vous déconnecter de cet appareil ?')) {
       S.tokens = null;
       S.me = null;
       LS.del('auth');

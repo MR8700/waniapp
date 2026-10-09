@@ -265,4 +265,55 @@ test('points: unicité globale inter-établissements (ex: E1=T500, E2=M505) et r
   e.close();
 });
 
+test('établissement & sécurité: modification nom, logo, codes secours et association appareil', async () => {
+  const { e, tok } = await setup();
+
+  // 1. Gérant modifie le nom et le logo de son établissement
+  const updateRes = await e.call('PATCH', `/establishments/${e.seed.est}`, {
+    name: 'WANI Nouveau Nom',
+    logo: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=='
+  }, tok.m);
+  assert.equal(updateRes.status, 200);
+  assert.equal(updateRes.body.name, 'WANI Nouveau Nom');
+  assert.ok(updateRes.body.logo);
+
+  // Vérifier via /me
+  const meRes = await e.call('GET', '/me', null, tok.m);
+  assert.equal(meRes.body.memberships[0].name, 'WANI Nouveau Nom');
+  assert.ok(meRes.body.memberships[0].logo);
+
+  // 2. Gérant retire le logo
+  const delLogoRes = await e.call('PATCH', `/establishments/${e.seed.est}`, {
+    logo: null
+  }, tok.m);
+  assert.equal(delLogoRes.status, 200);
+  assert.equal(delLogoRes.body.logo, null);
+
+  // 3. Gérant génère des codes de secours
+  const backupRes = await e.call('POST', '/me/backup-codes', null, tok.m);
+  assert.equal(backupRes.status, 200);
+  assert.equal(backupRes.body.codes.length, 5);
+  const myBackupCode = backupRes.body.codes[0];
+  assert.ok(myBackupCode.startsWith('WANI-'));
+
+  // 4. Utilisation du code de secours sur un nouvel appareil
+  const devRecov = await newDevice(e, { name: 'Appareil de Secours', invite_code: myBackupCode });
+  const tokRecov = await devRecov.token();
+  assert.ok(tokRecov);
+
+  // Le nouvel appareil est rattaché au même compte gérant
+  const meRecov = await e.call('GET', '/me', null, tokRecov);
+  assert.equal(meRecov.body.id, meRes.body.id);
+  assert.equal(meRecov.body.memberships[0].establishment_id, e.seed.est);
+
+  // 5. Code d'association d'appareil (24h)
+  const pairRes = await e.call('POST', '/me/devices', { ttl: 86400e3 }, tok.m);
+  assert.equal(pairRes.status, 201);
+  assert.equal(pairRes.body.expires_in, 86400);
+  assert.ok(pairRes.body.code);
+
+  e.close();
+});
+
+
 
