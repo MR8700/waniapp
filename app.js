@@ -641,7 +641,7 @@ async function tablesView() {
   shell('Points de Livraison', `
     <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:10px">
       <b style="font-size:1.15rem">${S.points.length} point(s) de livraison</b>
-      <button class="big sm" id="add-point-btn" style="background:#0f766e">+ Ajouter une table</button>
+      <button class="big sm" id="add-point-btn" style="background:#0f766e">+ Ajouter un point de livraison</button>
     </div>
 
     ${S.points.length ? `
@@ -650,11 +650,13 @@ async function tablesView() {
           <div class="card row" style="justify-content:space-between;align-items:center">
             <div>
               <b style="font-size:1.1rem;display:block">🪑 ${esc(p.label)}</b>
-              <div class="muted" style="font-size:0.8rem">Code : <strong>${esc(p.code)}</strong> • ${esc(p.zone || 'Sur place')}</div>
+              <div class="muted" style="font-size:0.85rem">
+                Code court client : <strong style="color:#0f766e;font-family:monospace;letter-spacing:1px">${esc(p.code)}</strong> • ${esc(p.zone || 'Sur place')}
+              </div>
             </div>
             <div class="row" style="gap:6px">
               ${p.token ? `
-                <button class="sm sec" data-show-qr="${p.token}" data-label="${esc(p.label)}">
+                <button class="sm sec" data-show-qr="${p.token}" data-label="${esc(p.label)}" data-code="${esc(p.code)}">
                   📷 Voir QR
                 </button>
               ` : ''}
@@ -666,9 +668,9 @@ async function tablesView() {
     ` : `
       <div class="card" style="text-align:center;padding:36px 16px">
         <span class="material-symbols-outlined text-[44px]" style="color:var(--tx-muted)">table_restaurant</span>
-        <b style="display:block;margin-top:10px;font-size:1.1rem">Aucune table enregistrée</b>
-        <p class="muted" style="margin:4px 0 16px">Ajoutez vos tables ou comptoirs pour générer les QR codes clients.</p>
-        <button class="big" id="empty-add-pt" style="background:#0f766e">+ Créer ma première table</button>
+        <b style="display:block;margin-top:10px;font-size:1.1rem">Aucun point de livraison configuré</b>
+        <p class="muted" style="margin:4px 0 16px">Ajoutez vos tables, terrasses ou comptoirs pour générer les QR codes et codes clients.</p>
+        <button class="big" id="empty-add-pt" style="background:#0f766e">+ Ajouter un point de livraison</button>
       </div>
     `}
   `, 'tables');
@@ -680,6 +682,7 @@ async function tablesView() {
     b.onclick = () => {
       const token = b.dataset.showQr;
       const label = b.dataset.label;
+      const code = b.dataset.code;
       const clientUrl = `${window.location.origin.replace('vendeur.', 'client.')}/?q=${token}`;
       const qrImg = `https://api.qrserver.com/v1/create-qr-code/?size=250x250&data=${encodeURIComponent(clientUrl)}`;
 
@@ -688,18 +691,29 @@ async function tablesView() {
       m.innerHTML = `
         <div class="modal-box col" style="max-width:380px;text-align:center">
           <div class="row" style="justify-content:space-between;align-items:center">
-            <b class="hd" style="font-size:1.2rem">QR Code : ${esc(label)}</b>
+            <b class="hd" style="font-size:1.2rem">Point : ${esc(label)}</b>
             <button class="sm sec" id="close-qr">✕</button>
           </div>
-          <p class="muted" style="margin:6px 0 14px;font-size:0.85rem">Placez ce QR code sur la table pour que les clients commandent directement.</p>
+          <p class="muted" style="margin:6px 0 10px;font-size:0.85rem">Placez ce QR code sur la table ou le comptoir pour que les clients commandent directement.</p>
+
           <div style="background:#fff;padding:12px;border-radius:12px;display:inline-block;margin:0 auto">
             <img src="${qrImg}" alt="QR Code" style="width:200px;height:200px;display:block">
           </div>
-          <button class="big" id="print-qr" style="margin-top:14px;background:#0f766e">🖨️ Imprimer le QR Code</button>
+
+          <div style="background:#f0fdfa;border:1px solid #ccfbf1;padding:8px 12px;border-radius:8px;margin:12px 0 4px;text-align:center">
+            <div style="font-size:0.8rem;color:#0f766e;font-weight:700">Code court à saisir :</div>
+            <div style="font-size:1.4rem;font-weight:900;letter-spacing:2px;font-family:monospace;color:#042f2e">${esc(code)}</div>
+            <div style="font-size:0.75rem;color:#64748b;margin-top:2px">
+              Le client peut scanner le QR code OU saisir ce code dans l'application WANI.
+            </div>
+          </div>
+
+          <button class="big" id="print-qr" style="margin-top:10px;background:#0f766e">🖨️ Imprimer l'étiquette QR</button>
         </div>
       `;
       document.body.appendChild(m);
       $('#close-qr').onclick = () => m.remove();
+      m.onclick = (e) => { if (e.target === m) m.remove(); };
       $('#print-qr').onclick = () => window.print();
     };
   });
@@ -716,37 +730,153 @@ async function tablesView() {
 }
 
 function showAddPointModal() {
+  const existingCodes = (S.points || []).map(p => (p.code || '').toUpperCase());
+
+  function suggestNextCode(label = '') {
+    let prefix = 'T';
+    const clean = label.trim();
+    const match = clean.match(/^(table|terrasse|salon|vip|paillote|bar|comptoir|chambre)\s*(\d+)?/i);
+    if (match) {
+      const word = match[1].toUpperCase();
+      if (word.startsWith('TER')) prefix = 'TER';
+      else if (word.startsWith('SAL')) prefix = 'SAL';
+      else if (word.startsWith('PAIL')) prefix = 'P';
+      else if (word.startsWith('VIP')) prefix = 'VIP';
+      else if (word.startsWith('BAR') || word.startsWith('COMP')) prefix = 'BAR';
+      else if (word.startsWith('CHAM')) prefix = 'CH';
+      else prefix = 'T';
+      if (match[2]) {
+        const candidate = `${prefix}${String(match[2]).padStart(2, '0')}`;
+        if (!existingCodes.includes(candidate)) return candidate;
+      }
+    }
+    for (let i = 1; i <= 99; i++) {
+      const candidate = `${prefix}${String(i).padStart(2, '0')}`;
+      if (!existingCodes.includes(candidate)) return candidate;
+    }
+    return `P${Math.floor(10 + Math.random() * 90)}`;
+  }
+
+  const initialCode = suggestNextCode('');
+
   const m = document.createElement('div');
   m.className = 'modal-back';
   m.innerHTML = `
-    <div class="modal-box col" style="max-width:420px">
-      <b class="hd" style="font-size:1.25rem">Ajouter une table ou un point</b>
-      <p class="muted" style="margin:4px 0 14px">Un QR code unique sera automatiquement créé pour cette table.</p>
+    <div class="modal-box col" style="max-width:440px;position:relative">
+      <div class="row" style="justify-content:space-between;align-items:center;margin-bottom:6px">
+        <b class="hd" style="font-size:1.25rem;color:var(--tx)">Ajouter un point de livraison</b>
+        <button class="sm sec" id="close-modal-x" style="padding:4px 8px;font-weight:900" title="Fermer la modale">✕</button>
+      </div>
+      <p class="muted" style="margin:0 0 16px;font-size:0.85rem">
+        Indiquez le point où la commande doit être livrée (table, terrasse, paillote, comptoir, salon VIP...).
+      </p>
 
-      <label class="muted" style="font-weight:700">Nom / Libellé de la table</label>
-      <input id="pt-label" placeholder="Ex: Table 1, Terrasse VIP, Comptoir...">
+      <label class="muted" style="font-weight:700">Nom ou numéro du point de livraison</label>
+      <input id="pt-label" placeholder="Ex: Table 1, Paillote 4, VIP 2, Comptoir..." style="font-size:1rem" autocomplete="off">
 
-      <label class="muted" style="font-weight:700;margin-top:8px">Code court</label>
-      <input id="pt-code" placeholder="Ex: T1, VIP, BAR...">
+      <div style="margin:14px 0 6px;padding:12px;background:#f0fdfa;border:1px solid #ccfbf1;border-radius:10px">
+        <label style="display:flex;align-items:center;gap:8px;font-weight:700;cursor:pointer;color:#0f766e">
+          <input type="checkbox" id="pt-auto-code" checked style="width:18px;height:18px;accent-color:#0f766e">
+          Générer automatiquement un code court unique
+        </label>
+        <div style="font-size:0.75rem;color:#0d9488;margin-top:4px;line-height:1.4">
+          Code court et facile à mémoriser pour le client afin de diriger directement vers votre boutique.
+        </div>
 
-      <button class="big" id="save-pt-btn" style="margin-top:14px;background:#0f766e">Enregistrer &amp; Générer le QR</button>
+        <div id="code-input-area" style="margin-top:10px">
+          <label class="muted" style="font-weight:700;font-size:0.8rem">Code court client (ex: T01, J04) :</label>
+          <input id="pt-code" value="${initialCode}" style="font-family:monospace;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;margin-top:4px;font-size:1.05rem" maxlength="15" autocomplete="off">
+          <div id="code-status" style="font-size:0.75rem;margin-top:4px;font-weight:600;color:#0f766e">
+            ✓ Code disponible et facile à saisir
+          </div>
+        </div>
+      </div>
+
+      <div class="row" style="gap:8px;margin-top:16px;justify-content:flex-end">
+        <button class="sec" id="cancel-pt-btn">Annuler</button>
+        <button class="big" id="save-pt-btn" style="background:#0f766e;padding:0 20px">Enregistrer le point</button>
+      </div>
     </div>
   `;
   document.body.appendChild(m);
 
-  $('#save-pt-btn').onclick = async () => {
-    const label = $('#pt-label').value.trim();
-    const code = $('#pt-code').value.trim() || label.slice(0, 5).toUpperCase();
-    if (!label) return alert('Veuillez entrer un libellé.');
+  const closeModal = () => {
+    window.removeEventListener('keydown', onKeyDown);
+    m.remove();
+  };
+  const onKeyDown = (e) => {
+    if (e.key === 'Escape') closeModal();
+  };
+  window.addEventListener('keydown', onKeyDown);
+
+  $('#close-modal-x').onclick = closeModal;
+  $('#cancel-pt-btn').onclick = closeModal;
+  m.onclick = (e) => { if (e.target === m) closeModal(); };
+
+  const labelIn = $('#pt-label');
+  const codeIn = $('#pt-code');
+  const autoChk = $('#pt-auto-code');
+  const statusBox = $('#code-status');
+  const saveBtn = $('#save-pt-btn');
+
+  function validateCode() {
+    const val = (codeIn.value || '').trim().toUpperCase();
+    if (!val) {
+      statusBox.innerHTML = '<span style="color:var(--er)">⚠️ Le code court ne peut pas être vide.</span>';
+      saveBtn.disabled = true;
+      return false;
+    }
+    if (existingCodes.includes(val)) {
+      statusBox.innerHTML = `<span style="color:var(--er)">⚠️ Le code "${esc(val)}" existe déjà dans votre établissement.</span>`;
+      saveBtn.disabled = true;
+      return false;
+    }
+    statusBox.innerHTML = '<span style="color:#0f766e">✓ Code disponible et facile à saisir</span>';
+    saveBtn.disabled = false;
+    return true;
+  }
+
+  labelIn.addEventListener('input', () => {
+    if (autoChk.checked) {
+      codeIn.value = suggestNextCode(labelIn.value);
+      validateCode();
+    }
+  });
+
+  autoChk.addEventListener('change', () => {
+    if (autoChk.checked) {
+      codeIn.value = suggestNextCode(labelIn.value);
+    }
+    validateCode();
+  });
+
+  codeIn.addEventListener('input', () => {
+    codeIn.value = codeIn.value.toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+    if (autoChk.checked && codeIn.value !== suggestNextCode(labelIn.value)) {
+      autoChk.checked = false;
+    }
+    validateCode();
+  });
+
+  saveBtn.onclick = async () => {
+    const label = labelIn.value.trim();
+    const code = (codeIn.value || '').trim().toUpperCase();
+    if (!label) return alert('Veuillez entrer un nom ou numéro pour ce point de livraison.');
+    if (!validateCode()) return;
+
+    saveBtn.disabled = true;
     try {
       await api('POST', `/establishments/${S.currentEst.id}/points`, { label, code });
-      m.remove();
-      toast('Table créée avec succès !');
+      closeModal();
+      toast('Point de livraison créé avec succès !', 'ok');
       tablesView();
     } catch (e) {
-      alert('Erreur: ' + e.message);
+      saveBtn.disabled = false;
+      alert('Erreur: ' + (e.message || e));
     }
   };
+
+  labelIn.focus();
 }
 
 // ==========================================
